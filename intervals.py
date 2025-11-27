@@ -18,6 +18,9 @@ API_STINTS_URL = "https://api.openf1.org/v1/stints?session_key={session_key}&dri
 API_LAPS_URL = "https://api.openf1.org/v1/laps?session_key={session_key}&driver_number={driver_number}"
 API_PIT_URL = "https://api.openf1.org/v1/pit?session_key={session_key}"
 API_WEATHER_URL = "https://api.openf1.org/v1/weather?session_key={session_key}"
+API_RACE_CONTROL_URL = (
+    "https://api.openf1.org/v1/race_control?session_key={session_key}&driver_number={driver_number}"
+)
 
 # Cache per i nomi dei piloti: chiave = (session_key, driver_number)
 DRIVER_CACHE = {}
@@ -35,6 +38,8 @@ gap_click_data = {"laps": [], "gap_leader": [], "gap_prev": []}
 gap_point_info_var = None  # inizializzato dopo la creazione della GUI
 gap_slipstream_var = None
 gap_pressure_tree = None
+race_control_tree = None
+race_control_info_var = None
 
 # Impostazioni per identificare scia/aria pulita e momenti chiave
 SLIPSTREAM_THRESHOLD = 1.0
@@ -205,6 +210,20 @@ def fetch_weather(session_key: int):
     return weather
 
 
+def fetch_race_control_messages(session_key: int, driver_number):
+    """Messaggi Race Control per un pilota specifico nella sessione."""
+    try:
+        dn_key = int(driver_number)
+    except (ValueError, TypeError):
+        raise RuntimeError("driver_number non valido per la chiamata race_control.")
+
+    url = API_RACE_CONTROL_URL.format(session_key=session_key, driver_number=dn_key)
+    messages = http_get_json(url)
+    if not isinstance(messages, list):
+        raise RuntimeError("Formato JSON inatteso per i dati Race Control.")
+    return messages
+
+
 # --------------------- Utility per la GUI --------------------- #
 
 def format_time_from_seconds(seconds_value):
@@ -335,6 +354,7 @@ def clear_driver_plots():
         stints_combo.set("")
 
     clear_stints_summary_table()
+    clear_race_control_table()
 
 
 def clear_weather_plot():
@@ -354,6 +374,19 @@ def clear_weather_plot():
 
     update_weather_stats_box()
     clear_weather_performance_plot()
+
+
+def clear_race_control_table():
+    """Svuota la tabella Race Control e resetta il messaggio informativo."""
+    global race_control_tree, race_control_info_var
+    if race_control_tree is not None:
+        for item in race_control_tree.get_children():
+            race_control_tree.delete(item)
+
+    if race_control_info_var is not None:
+        race_control_info_var.set(
+            "Messaggi Race Control: seleziona una sessione Race/Sprint e un pilota per visualizzare i dettagli."
+        )
 
 
 def clear_stats_table():
@@ -396,6 +429,69 @@ def update_pressure_table(segments):
                 seg["end_lap"],
                 delta_str,
             ),
+        )
+
+
+def update_race_control_messages(session_key: int, driver_number, title_driver: str):
+    """Scarica e popola i messaggi Race Control per il pilota selezionato."""
+    global race_control_tree, race_control_info_var
+
+    clear_race_control_table()
+
+    if race_control_tree is None:
+        return
+
+    if race_control_info_var is not None:
+        race_control_info_var.set(
+            f"Scarico messaggi Race Control per {title_driver}..."
+        )
+
+    try:
+        messages = fetch_race_control_messages(session_key, driver_number)
+    except RuntimeError as e:
+        if race_control_info_var is not None:
+            race_control_info_var.set("Errore nel recupero dei messaggi Race Control.")
+        messagebox.showerror("Errore Race Control", str(e))
+        return
+
+    if not messages:
+        if race_control_info_var is not None:
+            race_control_info_var.set(
+                f"Nessun messaggio Race Control per {title_driver} in questa sessione."
+            )
+        return
+
+    try:
+        sorted_msgs = sorted(
+            messages,
+            key=lambda m: (
+                m.get("lap_number") if isinstance(m.get("lap_number"), int) else -1,
+                m.get("date", ""),
+            ),
+        )
+    except Exception:
+        sorted_msgs = messages
+
+    for msg in sorted_msgs:
+        raw_date = msg.get("date", "")
+        parsed = parse_iso_datetime(raw_date)
+        date_str = parsed.strftime("%Y-%m-%d %H:%M:%S") if parsed else str(raw_date)
+
+        lap_number = msg.get("lap_number", "")
+        category = msg.get("category", "")
+        flag = msg.get("flag", "")
+        scope = msg.get("scope", "")
+        message_text = msg.get("message", "")
+
+        race_control_tree.insert(
+            "",
+            "end",
+            values=(date_str, lap_number, category, flag, scope, message_text),
+        )
+
+    if race_control_info_var is not None:
+        race_control_info_var.set(
+            f"{len(sorted_msgs)} messaggi Race Control per {title_driver} (ordinati per giro e data)."
         )
 
 
@@ -1551,6 +1647,7 @@ def on_fetch_sessions_click():
     clear_weather_plot()
     clear_stats_table()
     clear_pit_strategy()
+    clear_race_control_table()
 
     year_str = year_entry.get().strip()
     if not year_str.isdigit() or len(year_str) != 4:
@@ -1612,6 +1709,7 @@ def on_fetch_results_click(event=None):
     clear_weather_plot()
     clear_stats_table()
     clear_pit_strategy()
+    clear_race_control_table()
 
     current_pit_data = []
     current_results_data = []
@@ -1982,10 +2080,16 @@ def on_show_driver_plots_click():
             "Nessun dato giri disponibile per questo pilota in questa sessione."
         )
 
+    status_var.set(
+        f"Scarico messaggi Race Control per sessione {session_key}, pilota {driver_number}..."
+    )
+    root.update_idletasks()
+    update_race_control_messages(session_key, driver_number, title_driver)
+
     plots_notebook.select(gap_tab_frame)
 
     status_var.set(
-        f"Grafici, analisi gomme e tabella giri aggiornati per pilota {driver_number} ({title_driver}). "
+        f"Grafici, analisi gomme, Race Control e tabella giri aggiornati per pilota {driver_number} ({title_driver}). "
         "La tabella pit stop mostra tutti i pit della sessione; la tab Meteo mostra l'evoluzione meteo."
     )
 
@@ -2288,18 +2392,20 @@ pit_strategy_button.pack(side="left")
 
 ttk.Separator(main_frame, orient="horizontal").pack(fill="x", pady=8)
 
-# Notebook con cinque tab: distacchi / gomme / meteo / statistiche / pit strategia
+# Notebook con sei tab: distacchi / gomme / Race Control / meteo / statistiche / pit strategia
 plots_notebook = ttk.Notebook(main_frame)
 plots_notebook.pack(fill="both", expand=True)
 
 gap_tab_frame = ttk.Frame(plots_notebook)
 stints_tab_frame = ttk.Frame(plots_notebook)
+race_control_tab_frame = ttk.Frame(plots_notebook)
 weather_tab_frame = ttk.Frame(plots_notebook)
 stats_tab_frame = ttk.Frame(plots_notebook)
 pit_strategy_tab_frame = ttk.Frame(plots_notebook)
 
 plots_notebook.add(gap_tab_frame, text="Grafico distacchi")
 plots_notebook.add(stints_tab_frame, text="Gomme: mappa & analisi")
+plots_notebook.add(race_control_tab_frame, text="Race Control")
 plots_notebook.add(weather_tab_frame, text="Meteo sessione")
 plots_notebook.add(stats_tab_frame, text="Statistiche piloti")
 plots_notebook.add(pit_strategy_tab_frame, text="Pit stop & strategia")
@@ -2355,6 +2461,62 @@ gap_pressure_tree.column("end", width=80, anchor="center")
 gap_pressure_tree.column("delta", width=100, anchor="center")
 
 gap_pressure_tree.pack(fill="x", padx=5, pady=4)
+
+# --- Contenuto tab Race Control --- #
+race_control_info_var = tk.StringVar(
+    value="Messaggi Race Control: seleziona una sessione Race/Sprint e un pilota per visualizzare i dettagli."
+)
+race_control_info_label = ttk.Label(
+    race_control_tab_frame,
+    textvariable=race_control_info_var,
+    anchor="w",
+    wraplength=1250,
+)
+race_control_info_label.pack(fill="x", padx=5, pady=(5, 2))
+
+race_control_frame = ttk.Frame(race_control_tab_frame)
+race_control_frame.pack(fill="both", expand=True, padx=5, pady=(0, 5))
+
+race_control_columns = (
+    "date_time",
+    "lap",
+    "category",
+    "flag",
+    "scope",
+    "message",
+)
+
+race_control_tree = ttk.Treeview(
+    race_control_frame,
+    columns=race_control_columns,
+    show="headings",
+    height=12,
+)
+
+race_control_tree.heading("date_time", text="Data / Ora")
+race_control_tree.heading("lap", text="Giro")
+race_control_tree.heading("category", text="Categoria")
+race_control_tree.heading("flag", text="Segnale")
+race_control_tree.heading("scope", text="Ambito")
+race_control_tree.heading("message", text="Messaggio")
+
+race_control_tree.column("date_time", width=150, anchor="center")
+race_control_tree.column("lap", width=70, anchor="center")
+race_control_tree.column("category", width=120, anchor="center")
+race_control_tree.column("flag", width=140, anchor="center")
+race_control_tree.column("scope", width=100, anchor="center")
+race_control_tree.column("message", width=800, anchor="w")
+
+race_control_vsb = ttk.Scrollbar(
+    race_control_frame, orient="vertical", command=race_control_tree.yview
+)
+race_control_tree.configure(yscrollcommand=race_control_vsb.set)
+
+race_control_tree.grid(row=0, column=0, sticky="nsew")
+race_control_vsb.grid(row=0, column=1, sticky="ns")
+
+race_control_frame.rowconfigure(0, weight=1)
+race_control_frame.columnconfigure(0, weight=1)
 
 # --- Contenuto tab Gomme (stints_tab_frame) --- #
 stints_mode_var = tk.StringVar(value="map")
