@@ -2132,34 +2132,194 @@ def on_fetch_race_control_click():
 # --------------------- Costruzione GUI --------------------- #
 
 root = tk.Tk()
-root.title("F1 OpenF1 Tool: Calendario, Risultati, Distacchi, Gomme, Giri, Pit, Meteo, Statistiche & Strategia")
-root.geometry("1400x900")
-root.minsize(1200, 800)
+root.title(
+    "F1 OpenF1 Tool: Calendario, Risultati, Distacchi, Gomme, Giri, Pit, Meteo, Statistiche & Strategia"
+)
+root.geometry("1500x950")
+root.minsize(1280, 850)
 
-# --- Frame input anno --- #
-input_frame = ttk.Frame(root, padding=10)
-input_frame.pack(fill="x")
+DARK_BG = "#0b1220"
+DARK_PANEL = "#111827"
+ACCENT = "#22d3ee"
+TEXT_COLOR = "#e5e7eb"
+MUTED_TEXT = "#9ca3af"
 
-ttk.Label(input_frame, text="Anno (es. 2023):").pack(side="left")
-year_entry = ttk.Entry(input_frame, width=10)
-year_entry.pack(side="left", padx=5)
+
+def apply_dark_theme(app_root: tk.Tk):
+    style = ttk.Style(app_root)
+    style.theme_use("clam")
+
+    style.configure(
+        ".",
+        background=DARK_BG,
+        foreground=TEXT_COLOR,
+        fieldbackground=DARK_PANEL,
+        relief="flat",
+    )
+    style.configure("TFrame", background=DARK_BG)
+    style.configure("Card.TFrame", background=DARK_PANEL)
+    style.configure(
+        "Card.TLabelframe",
+        background=DARK_PANEL,
+        foreground=TEXT_COLOR,
+        bordercolor="#1f2937",
+        relief="groove",
+        padding=6,
+    )
+    style.configure(
+        "Card.TLabelframe.Label",
+        background=DARK_PANEL,
+        foreground=TEXT_COLOR,
+        font=("", 10, "bold"),
+    )
+    style.configure("TLabel", background=DARK_BG, foreground=TEXT_COLOR)
+    style.configure("Header.TLabel", background=DARK_BG, foreground=TEXT_COLOR, font=("", 11, "bold"))
+    style.configure(
+        "Info.TLabel",
+        background=DARK_PANEL,
+        foreground=MUTED_TEXT,
+        wraplength=1200,
+    )
+    style.configure(
+        "Status.TLabel",
+        background="#0f172a",
+        foreground=TEXT_COLOR,
+        padding=6,
+    )
+    style.configure(
+        "TButton",
+        background="#1f2937",
+        foreground=TEXT_COLOR,
+        borderwidth=0,
+        padding=(10, 6),
+    )
+    style.map(
+        "TButton",
+        background=[("active", "#2563eb"), ("pressed", "#1d4ed8")],
+        foreground=[("disabled", MUTED_TEXT)],
+    )
+    style.configure(
+        "Treeview",
+        background=DARK_PANEL,
+        foreground=TEXT_COLOR,
+        fieldbackground=DARK_PANEL,
+        bordercolor="#1f2937",
+    )
+    style.map(
+        "Treeview",
+        background=[("selected", "#374151")],
+        foreground=[("selected", TEXT_COLOR)],
+    )
+    style.configure(
+        "Treeview.Heading",
+        background="#111827",
+        foreground=TEXT_COLOR,
+        bordercolor="#1f2937",
+    )
+    style.configure(
+        "TNotebook",
+        background=DARK_BG,
+        foreground=TEXT_COLOR,
+        tabmargins=2,
+    )
+    style.configure(
+        "TNotebook.Tab",
+        background="#1f2937",
+        foreground=TEXT_COLOR,
+        padding=(10, 6),
+    )
+    style.map("TNotebook.Tab", background=[("selected", DARK_PANEL)], foreground=[("disabled", MUTED_TEXT)])
+    style.configure("TEntry", fieldbackground=DARK_PANEL, foreground=TEXT_COLOR, insertcolor=TEXT_COLOR)
+    style.configure("TCombobox", fieldbackground=DARK_PANEL, foreground=TEXT_COLOR)
+
+    app_root.option_add("*TCombobox*Listbox*Background", DARK_PANEL)
+    app_root.option_add("*TCombobox*Listbox*Foreground", TEXT_COLOR)
+
+
+apply_dark_theme(root)
+root.configure(bg=DARK_BG)
+
+# --- Barra comandi e input --- #
+input_frame = ttk.Frame(root, padding=(12, 10), style="Card.TFrame")
+input_frame.pack(fill="x", padx=10, pady=(10, 6))
+
+year_block = ttk.Frame(input_frame, style="Card.TFrame")
+year_block.pack(side="left", fill="x", expand=True)
+
+ttk.Label(year_block, text="Anno (es. 2023):", style="Header.TLabel").pack(side="left")
+year_entry = ttk.Entry(year_block, width=10)
+year_entry.pack(side="left", padx=6)
 year_entry.insert(0, "2023")
 
 fetch_sessions_button = ttk.Button(
-    input_frame,
+    year_block,
     text="Recupera calendario",
-    command=on_fetch_sessions_click
+    command=on_fetch_sessions_click,
 )
-fetch_sessions_button.pack(side="left", padx=5)
+fetch_sessions_button.pack(side="left", padx=6)
 
-# --- Frame principale --- #
-main_frame = ttk.Frame(root, padding=(10, 0, 10, 10))
-main_frame.pack(fill="both", expand=True)
+actions_frame = ttk.Frame(input_frame, style="Card.TFrame")
+actions_frame.pack(side="right", fill="x")
 
-# Sessioni
-ttk.Label(main_frame, text="Sessioni disponibili:", font=("", 10, "bold")).pack(anchor="w")
+fetch_results_button = ttk.Button(
+    actions_frame,
+    text="Mostra risultati sessione",
+    command=on_fetch_results_click,
+)
+fetch_results_button.grid(row=0, column=0, padx=4, pady=2, sticky="ew")
 
-sessions_frame = ttk.Frame(main_frame)
+plot_button = ttk.Button(
+    actions_frame,
+    text="Grafici & giri pilota",
+    command=on_show_driver_plots_click,
+)
+plot_button.grid(row=0, column=1, padx=4, pady=2, sticky="ew")
+
+stats_button = ttk.Button(
+    actions_frame,
+    text="Statistiche lap time",
+    command=on_compute_session_stats_click,
+)
+stats_button.grid(row=0, column=2, padx=4, pady=2, sticky="ew")
+
+pit_strategy_button = ttk.Button(
+    actions_frame,
+    text="Pit stop & strategia",
+    command=on_compute_pit_strategy_click,
+)
+pit_strategy_button.grid(row=0, column=3, padx=4, pady=2, sticky="ew")
+
+race_control_action = ttk.Button(
+    actions_frame,
+    text="Race Control pilota",
+    command=on_fetch_race_control_click,
+)
+race_control_action.grid(row=0, column=4, padx=4, pady=2, sticky="ew")
+
+actions_frame.columnconfigure((0, 1, 2, 3, 4), weight=1)
+
+# --- Layout principale con paned window per mostrare tutte le sezioni --- #
+main_paned = ttk.Panedwindow(root, orient=tk.VERTICAL)
+main_paned.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+top_paned = ttk.Panedwindow(main_paned, orient=tk.HORIZONTAL)
+main_paned.add(top_paned, weight=3)
+
+sessions_panel = ttk.Labelframe(
+    top_paned,
+    text="Calendario sessioni",
+    style="Card.TLabelframe",
+)
+top_paned.add(sessions_panel, weight=2)
+
+ttk.Label(
+    sessions_panel,
+    text="Doppio click per caricare i risultati della sessione.",
+    style="Info.TLabel",
+    anchor="w",
+).pack(fill="x", pady=(0, 4))
+
+sessions_frame = ttk.Frame(sessions_panel, style="Card.TFrame")
 sessions_frame.pack(fill="both", expand=True)
 
 sessions_columns = (
@@ -2178,7 +2338,7 @@ sessions_tree = ttk.Treeview(
     sessions_frame,
     columns=sessions_columns,
     show="headings",
-    height=6
+    height=10,
 )
 
 sessions_tree.heading("year", text="Anno")
@@ -2192,19 +2352,20 @@ sessions_tree.heading("session_key", text="Session Key")
 sessions_tree.heading("meeting_key", text="Meeting Key")
 
 sessions_tree.column("year", width=60, anchor="center")
-sessions_tree.column("datetime", width=160, anchor="center")
-sessions_tree.column("session_name", width=170)
-sessions_tree.column("session_type", width=80, anchor="center")
-sessions_tree.column("circuit", width=150)
-sessions_tree.column("location", width=150)
-sessions_tree.column("country", width=130)
-sessions_tree.column("session_key", width=0, stretch=False)
-sessions_tree.column("meeting_key", width=0, stretch=False)
+sessions_tree.column("datetime", width=170, anchor="center")
+sessions_tree.column("session_name", width=190)
+sessions_tree.column("session_type", width=90, anchor="center")
+sessions_tree.column("circuit", width=160)
+sessions_tree.column("location", width=160)
+sessions_tree.column("country", width=150)
+
+sessions_tree.column("session_key", width=100, anchor="center")
+sessions_tree.column("meeting_key", width=110, anchor="center")
 
 sessions_vsb = ttk.Scrollbar(
     sessions_frame,
     orient="vertical",
-    command=sessions_tree.yview
+    command=sessions_tree.yview,
 )
 sessions_tree.configure(yscrollcommand=sessions_vsb.set)
 
@@ -2214,31 +2375,17 @@ sessions_vsb.grid(row=0, column=1, sticky="ns")
 sessions_frame.rowconfigure(0, weight=1)
 sessions_frame.columnconfigure(0, weight=1)
 
-results_button_frame = ttk.Frame(main_frame)
-results_button_frame.pack(fill="x", pady=(5, 0))
-
-fetch_results_button = ttk.Button(
-    results_button_frame,
-    text="Mostra risultati della sessione selezionata",
-    command=on_fetch_results_click
-)
-fetch_results_button.pack(side="left")
-
 sessions_tree.bind("<Double-1>", on_fetch_results_click)
 
-ttk.Separator(main_frame, orient="horizontal").pack(fill="x", pady=8)
+right_paned = ttk.Panedwindow(top_paned, orient=tk.VERTICAL)
+top_paned.add(right_paned, weight=3)
 
-# Area centrale: risultati + (giri + pit) affiancati
-center_frame = ttk.Frame(main_frame)
-center_frame.pack(fill="both", expand=True)
+results_panel = ttk.Labelframe(
+    right_paned, text="Risultati sessione", style="Card.TLabelframe"
+)
+right_paned.add(results_panel, weight=2)
 
-# Risultati
-left_frame = ttk.Frame(center_frame)
-left_frame.pack(side="left", fill="both", expand=True, padx=(0, 5))
-
-ttk.Label(left_frame, text="Risultati sessione:", font=("", 10, "bold")).pack(anchor="w")
-
-results_frame = ttk.Frame(left_frame)
+results_frame = ttk.Frame(results_panel, style="Card.TFrame")
 results_frame.pack(fill="both", expand=True)
 
 results_columns = (
@@ -2256,7 +2403,7 @@ results_tree = ttk.Treeview(
     results_frame,
     columns=results_columns,
     show="headings",
-    height=8
+    height=8,
 )
 
 results_tree.heading("position", text="Pos.")
@@ -2265,22 +2412,22 @@ results_tree.heading("driver_name", text="Pilota")
 results_tree.heading("laps", text="Giri")
 results_tree.heading("points", text="Punti")
 results_tree.heading("status", text="Stato")
-results_tree.heading("gap", text="Gap leader (s)")
-results_tree.heading("duration", text="Durata totale")
+results_tree.heading("gap", text="Gap")
+results_tree.heading("duration", text="Durata")
 
-results_tree.column("position", width=45, anchor="center")
-results_tree.column("driver_number", width=45, anchor="center")
-results_tree.column("driver_name", width=180, anchor="w")
-results_tree.column("laps", width=60, anchor="center")
-results_tree.column("points", width=60, anchor="center")
-results_tree.column("status", width=80, anchor="center")
+results_tree.column("position", width=50, anchor="center")
+results_tree.column("driver_number", width=50, anchor="center")
+results_tree.column("driver_name", width=170, anchor="w")
+results_tree.column("laps", width=70, anchor="center")
+results_tree.column("points", width=70, anchor="center")
+results_tree.column("status", width=130, anchor="w")
 results_tree.column("gap", width=110, anchor="center")
 results_tree.column("duration", width=130, anchor="center")
 
 results_vsb = ttk.Scrollbar(
     results_frame,
     orient="vertical",
-    command=results_tree.yview
+    command=results_tree.yview,
 )
 results_tree.configure(yscrollcommand=results_vsb.set)
 
@@ -2290,18 +2437,23 @@ results_vsb.grid(row=0, column=1, sticky="ns")
 results_frame.rowconfigure(0, weight=1)
 results_frame.columnconfigure(0, weight=1)
 
-# Colonna destra: giri + pit stop
-right_frame = ttk.Frame(center_frame)
-right_frame.pack(side="left", fill="both", expand=True, padx=(5, 0))
+pilot_panel = ttk.Labelframe(
+    right_paned,
+    text="Dettaglio pilota selezionato (giri + pit)",
+    style="Card.TLabelframe",
+)
+right_paned.add(pilot_panel, weight=3)
 
-ttk.Label(
-    right_frame,
-    text="Dettaglio giri del pilota selezionato (Race/Sprint):",
-    font=("", 10, "bold")
-).pack(anchor="w")
+pilot_paned = ttk.Panedwindow(pilot_panel, orient=tk.HORIZONTAL)
+pilot_paned.pack(fill="both", expand=True)
 
-laps_frame = ttk.Frame(right_frame)
-laps_frame.pack(fill="both", expand=True)
+laps_frame = ttk.Labelframe(
+    pilot_paned, text="Giri del pilota", style="Card.TLabelframe"
+)
+pilot_paned.add(laps_frame, weight=3)
+
+laps_table_frame = ttk.Frame(laps_frame, style="Card.TFrame")
+laps_table_frame.pack(fill="both", expand=True)
 
 laps_columns = (
     "lap_number",
@@ -2316,10 +2468,10 @@ laps_columns = (
 )
 
 laps_tree = ttk.Treeview(
-    laps_frame,
+    laps_table_frame,
     columns=laps_columns,
     show="headings",
-    height=6
+    height=8,
 )
 
 laps_tree.heading("lap_number", text="Giro")
@@ -2332,39 +2484,38 @@ laps_tree.heading("s2_speed", text="S2 Speed")
 laps_tree.heading("st_speed", text="Speed Trap")
 laps_tree.heading("out_lap", text="Out Lap")
 
-laps_tree.column("lap_number", width=50, anchor="center")
-laps_tree.column("lap_time", width=90, anchor="center")
-laps_tree.column("s1_time", width=90, anchor="center")
-laps_tree.column("s2_time", width=90, anchor="center")
-laps_tree.column("s3_time", width=90, anchor="center")
-laps_tree.column("s1_speed", width=80, anchor="center")
-laps_tree.column("s2_speed", width=80, anchor="center")
-laps_tree.column("st_speed", width=80, anchor="center")
-laps_tree.column("out_lap", width=60, anchor="center")
+laps_tree.column("lap_number", width=55, anchor="center")
+laps_tree.column("lap_time", width=95, anchor="center")
+laps_tree.column("s1_time", width=95, anchor="center")
+laps_tree.column("s2_time", width=95, anchor="center")
+laps_tree.column("s3_time", width=95, anchor="center")
+laps_tree.column("s1_speed", width=90, anchor="center")
+laps_tree.column("s2_speed", width=90, anchor="center")
+laps_tree.column("st_speed", width=90, anchor="center")
+laps_tree.column("out_lap", width=70, anchor="center")
 
-laps_tree.tag_configure("outlap", background="#ffe4b5")
+laps_tree.tag_configure("outlap", background="#312e81", foreground=TEXT_COLOR)
 
 laps_vsb = ttk.Scrollbar(
-    laps_frame,
+    laps_table_frame,
     orient="vertical",
-    command=laps_tree.yview
+    command=laps_tree.yview,
 )
 laps_tree.configure(yscrollcommand=laps_vsb.set)
 
 laps_tree.grid(row=0, column=0, sticky="nsew")
 laps_vsb.grid(row=0, column=1, sticky="ns")
 
-laps_frame.rowconfigure(0, weight=1)
-laps_frame.columnconfigure(0, weight=1)
+laps_table_frame.rowconfigure(0, weight=1)
+laps_table_frame.columnconfigure(0, weight=1)
 
-ttk.Label(
-    right_frame,
-    text="Pit stop della sessione (Race/Sprint):",
-    font=("", 10, "bold")
-).pack(anchor="w", pady=(5, 0))
+pits_frame = ttk.Labelframe(
+    pilot_paned, text="Pit stop sessione", style="Card.TLabelframe"
+)
+pilot_paned.add(pits_frame, weight=2)
 
-pits_frame = ttk.Frame(right_frame)
-pits_frame.pack(fill="both", expand=True)
+pits_table_frame = ttk.Frame(pits_frame, style="Card.TFrame")
+pits_table_frame.pack(fill="both", expand=True)
 
 pits_columns = (
     "pit_driver_name",
@@ -2373,70 +2524,50 @@ pits_columns = (
 )
 
 pits_tree = ttk.Treeview(
-    pits_frame,
+    pits_table_frame,
     columns=pits_columns,
     show="headings",
-    height=4
+    height=6,
 )
 
 pits_tree.heading("pit_driver_name", text="Pilota")
 pits_tree.heading("pit_lap_number", text="Giro")
 pits_tree.heading("pit_duration", text="Pit Time (s)")
 
-pits_tree.column("pit_driver_name", width=160, anchor="w")
-pits_tree.column("pit_lap_number", width=60, anchor="center")
-pits_tree.column("pit_duration", width=80, anchor="center")
+pits_tree.column("pit_driver_name", width=170, anchor="w")
+pits_tree.column("pit_lap_number", width=70, anchor="center")
+pits_tree.column("pit_duration", width=90, anchor="center")
 
 pits_vsb = ttk.Scrollbar(
-    pits_frame,
+    pits_table_frame,
     orient="vertical",
-    command=pits_tree.yview
+    command=pits_tree.yview,
 )
 pits_tree.configure(yscrollcommand=pits_vsb.set)
 
 pits_tree.grid(row=0, column=0, sticky="nsew")
 pits_vsb.grid(row=0, column=1, sticky="ns")
 
-pits_frame.rowconfigure(0, weight=1)
-pits_frame.columnconfigure(0, weight=1)
+pits_table_frame.rowconfigure(0, weight=1)
+pits_table_frame.columnconfigure(0, weight=1)
 
-# Pulsanti: grafici pilota + statistiche sessione + strategia pit
-buttons_bottom_frame = ttk.Frame(main_frame)
-buttons_bottom_frame.pack(fill="x", pady=(5, 0))
-
-plot_button = ttk.Button(
-    buttons_bottom_frame,
-    text="Mostra grafici e tabella giri per il pilota selezionato (Race/Sprint)",
-    command=on_show_driver_plots_click
+# --- Notebook inferiore per grafici e analisi --- #
+plots_shell = ttk.Labelframe(
+    main_paned,
+    text="Analisi grafica e output completi",
+    style="Card.TLabelframe",
 )
-plot_button.pack(side="left")
+main_paned.add(plots_shell, weight=4)
 
-stats_button = ttk.Button(
-    buttons_bottom_frame,
-    text="Calcola statistiche piloti (lap time)",
-    command=on_compute_session_stats_click
-)
-stats_button.pack(side="left", padx=10)
+plots_notebook = ttk.Notebook(plots_shell)
+plots_notebook.pack(fill="both", expand=True, padx=4, pady=4)
 
-pit_strategy_button = ttk.Button(
-    buttons_bottom_frame,
-    text="Analizza pit stop & strategia",
-    command=on_compute_pit_strategy_click
-)
-pit_strategy_button.pack(side="left")
-
-ttk.Separator(main_frame, orient="horizontal").pack(fill="x", pady=8)
-
-# Notebook con sei tab: distacchi / gomme / Race Control / meteo / statistiche / pit strategia
-plots_notebook = ttk.Notebook(main_frame)
-plots_notebook.pack(fill="both", expand=True)
-
-gap_tab_frame = ttk.Frame(plots_notebook)
-stints_tab_frame = ttk.Frame(plots_notebook)
-race_control_tab_frame = ttk.Frame(plots_notebook)
-weather_tab_frame = ttk.Frame(plots_notebook)
-stats_tab_frame = ttk.Frame(plots_notebook)
-pit_strategy_tab_frame = ttk.Frame(plots_notebook)
+gap_tab_frame = ttk.Frame(plots_notebook, padding=6, style="Card.TFrame")
+stints_tab_frame = ttk.Frame(plots_notebook, padding=6, style="Card.TFrame")
+race_control_tab_frame = ttk.Frame(plots_notebook, padding=6, style="Card.TFrame")
+weather_tab_frame = ttk.Frame(plots_notebook, padding=6, style="Card.TFrame")
+stats_tab_frame = ttk.Frame(plots_notebook, padding=6, style="Card.TFrame")
+pit_strategy_tab_frame = ttk.Frame(plots_notebook, padding=6, style="Card.TFrame")
 
 plots_notebook.add(gap_tab_frame, text="Grafico distacchi")
 plots_notebook.add(stints_tab_frame, text="Gomme: mappa & analisi")
@@ -2446,7 +2577,7 @@ plots_notebook.add(stats_tab_frame, text="Statistiche piloti")
 plots_notebook.add(pit_strategy_tab_frame, text="Pit stop & strategia")
 
 # --- Contenuto tab Grafico distacchi --- #
-gap_info_frame = ttk.Frame(gap_tab_frame)
+gap_info_frame = ttk.Frame(gap_tab_frame, style="Card.TFrame")
 gap_info_frame.pack(fill="x", padx=5, pady=(5, 2))
 
 gap_slipstream_var = tk.StringVar(value="In scia: -- | Aria pulita: --")
@@ -2463,14 +2594,15 @@ ttk.Label(
     text="Soglie: interval < 1.0s = scia, interval > 2.5s = aria pulita",
 ).pack(side="left", padx=(10, 0))
 
-gap_plot_frame = ttk.Frame(gap_tab_frame)
+gap_plot_frame = ttk.Frame(gap_tab_frame, style="Card.TFrame")
 gap_plot_frame.pack(fill="both", expand=True, padx=5, pady=(0, 4))
 
 gap_pressure_frame = ttk.LabelFrame(
     gap_tab_frame,
     text="Stints di pressione (variazioni rapide di gap)",
+    style="Card.TLabelframe",
 )
-gap_pressure_frame.pack(fill="x", padx=5, pady=(0, 5))
+gap_pressure_frame.pack(fill="both", expand=False, padx=5, pady=(0, 5))
 
 pressure_columns = (
     "metric",
@@ -2481,7 +2613,7 @@ pressure_columns = (
 )
 
 gap_pressure_tree = ttk.Treeview(
-    gap_pressure_frame, columns=pressure_columns, show="headings", height=4
+    gap_pressure_frame, columns=pressure_columns, show="headings", height=6
 )
 gap_pressure_tree.heading("metric", text="Metrica")
 gap_pressure_tree.heading("trend", text="Trend")
@@ -2495,7 +2627,7 @@ gap_pressure_tree.column("start", width=80, anchor="center")
 gap_pressure_tree.column("end", width=80, anchor="center")
 gap_pressure_tree.column("delta", width=100, anchor="center")
 
-gap_pressure_tree.pack(fill="x", padx=5, pady=4)
+gap_pressure_tree.pack(fill="both", expand=True, padx=5, pady=4)
 
 # --- Contenuto tab Race Control --- #
 race_control_info_var = tk.StringVar(
@@ -2509,10 +2641,11 @@ race_control_info_label = ttk.Label(
     textvariable=race_control_info_var,
     anchor="w",
     wraplength=1250,
+    style="Info.TLabel",
 )
 race_control_info_label.pack(fill="x", padx=5, pady=(5, 2))
 
-race_control_buttons_frame = ttk.Frame(race_control_tab_frame)
+race_control_buttons_frame = ttk.Frame(race_control_tab_frame, style="Card.TFrame")
 race_control_buttons_frame.pack(fill="x", padx=5, pady=(0, 4))
 
 race_control_fetch_button = ttk.Button(
@@ -2840,7 +2973,7 @@ ttk.Label(
     font=("", 9, "bold")
 ).pack(anchor="w", padx=5, pady=(0, 2))
 
-pit_strategy_plot_frame = ttk.Frame(pit_strategy_tab_frame)
+pit_strategy_plot_frame = ttk.Frame(pit_strategy_tab_frame, style="Card.TFrame")
 pit_strategy_plot_frame.pack(fill="both", expand=True, padx=5, pady=(0, 5))
 
 # --- Label info click distacchi --- #
@@ -2848,15 +2981,17 @@ gap_point_info_var = tk.StringVar(
     value="Clicca un punto sul grafico distacchi per vedere gap_to_leader e interval."
 )
 gap_point_info_label = ttk.Label(
-    main_frame, textvariable=gap_point_info_var, anchor="w"
+    plots_shell, textvariable=gap_point_info_var, anchor="w", style="Info.TLabel"
 )
-gap_point_info_label.pack(fill="x", pady=(4, 0))
+gap_point_info_label.pack(fill="x", padx=5, pady=(0, 4))
 
 # Barra di stato
 status_var = tk.StringVar(
     value="Inserisci un anno, premi 'Recupera calendario', poi seleziona una sessione."
 )
-status_label = ttk.Label(root, textvariable=status_var, anchor="w", padding=5)
+status_label = ttk.Label(
+    root, textvariable=status_var, anchor="w", padding=5, style="Status.TLabel"
+)
 status_label.pack(fill="x")
 
 # Avvio GUI
