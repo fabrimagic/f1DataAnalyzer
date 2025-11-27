@@ -4086,7 +4086,7 @@ def on_fetch_race_control_click():
 
 root = tk.Tk()
 root.title(
-    "Full Gas Podcast - F1 Analyzer"
+    "f1DataAnalyzer"
 )
 screen_w = root.winfo_screenwidth()
 screen_h = root.winfo_screenheight()

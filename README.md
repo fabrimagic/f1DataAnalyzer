@@ -1,7 +1,7 @@
-# Full Gas Podcast - F1 Analyzer
+# f1DataAnalyzer
 
 ## Introduzione
-"Full Gas Podcast - F1 Analyzer" è un'applicazione desktop basata su Tkinter che consente di esplorare e confrontare i dati delle sessioni di Formula 1 tramite l'API pubblica di [openf1.org](https://openf1.org). L'interfaccia unisce tabelle interattive e grafici Matplotlib per offrire una vista completa su distacchi, stint gomme, pit stop, meteo, messaggi Race Control, team radio e una timeline unificata degli eventi di gara.
+f1DataAnalyzer è un'applicazione desktop basata su Tkinter che consente di esplorare e confrontare i dati delle sessioni di Formula 1 tramite l'API pubblica di [openf1.org](https://openf1.org). L'interfaccia unisce tabelle interattive e grafici Matplotlib per offrire una vista completa su distacchi, stint gomme, pit stop, meteo, messaggi Race Control, team radio e una timeline unificata degli eventi di gara.
 
 ### Obiettivi principali
 - Fornire un cruscotto unico per analizzare le sessioni (Race o Sprint) e commentare l'andamento della gara.
