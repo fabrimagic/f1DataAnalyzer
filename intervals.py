@@ -18,9 +18,7 @@ API_STINTS_URL = "https://api.openf1.org/v1/stints?session_key={session_key}&dri
 API_LAPS_URL = "https://api.openf1.org/v1/laps?session_key={session_key}&driver_number={driver_number}"
 API_PIT_URL = "https://api.openf1.org/v1/pit?session_key={session_key}"
 API_WEATHER_URL = "https://api.openf1.org/v1/weather?session_key={session_key}"
-API_RACE_CONTROL_URL = (
-    "https://api.openf1.org/v1/race_control?driver_number={driver_number}&session_key={session_key}"
-)
+API_RACE_CONTROL_URL = "https://api.openf1.org/v1/race_control?session_key={session_key}"
 
 # Cache per i nomi dei piloti: chiave = (session_key, driver_number)
 DRIVER_CACHE = {}
@@ -210,14 +208,9 @@ def fetch_weather(session_key: int):
     return weather
 
 
-def fetch_race_control_messages(session_key: int, driver_number):
-    """Messaggi Race Control per un pilota specifico nella sessione."""
-    try:
-        dn_key = int(driver_number)
-    except (ValueError, TypeError):
-        raise RuntimeError("driver_number non valido per la chiamata race_control.")
-
-    url = API_RACE_CONTROL_URL.format(session_key=session_key, driver_number=dn_key)
+def fetch_race_control_messages(session_key: int):
+    """Messaggi Race Control per l'intera sessione."""
+    url = API_RACE_CONTROL_URL.format(session_key=session_key)
     messages = http_get_json(url)
     if not isinstance(messages, list):
         raise RuntimeError("Formato JSON inatteso per i dati Race Control.")
@@ -385,7 +378,7 @@ def clear_race_control_table():
 
     if race_control_info_var is not None:
         race_control_info_var.set(
-            "Messaggi Race Control: seleziona una sessione Race/Sprint e un pilota, poi premi "
+            "Messaggi Race Control: seleziona una sessione Race/Sprint, poi premi "
             "'Recupera messaggi Race Control' per visualizzare i dettagli."
         )
 
@@ -433,8 +426,8 @@ def update_pressure_table(segments):
         )
 
 
-def update_race_control_messages(session_key: int, driver_number, title_driver: str):
-    """Scarica e popola i messaggi Race Control per il pilota selezionato."""
+def update_race_control_messages(session_key: int):
+    """Scarica e popola i messaggi Race Control per l'intera sessione."""
     global race_control_tree, race_control_info_var
 
     clear_race_control_table()
@@ -443,12 +436,10 @@ def update_race_control_messages(session_key: int, driver_number, title_driver: 
         return
 
     if race_control_info_var is not None:
-        race_control_info_var.set(
-            f"Scarico messaggi Race Control per {title_driver}..."
-        )
+        race_control_info_var.set("Scarico messaggi Race Control per la sessione...")
 
     try:
-        messages = fetch_race_control_messages(session_key, driver_number)
+        messages = fetch_race_control_messages(session_key)
     except RuntimeError as e:
         if race_control_info_var is not None:
             race_control_info_var.set("Errore nel recupero dei messaggi Race Control.")
@@ -458,7 +449,7 @@ def update_race_control_messages(session_key: int, driver_number, title_driver: 
     if not messages:
         if race_control_info_var is not None:
             race_control_info_var.set(
-                f"Nessun messaggio Race Control per {title_driver} in questa sessione."
+                "Nessun messaggio Race Control in questa sessione."
             )
         return
 
@@ -492,7 +483,7 @@ def update_race_control_messages(session_key: int, driver_number, title_driver: 
 
     if race_control_info_var is not None:
         race_control_info_var.set(
-            f"{len(sorted_msgs)} messaggi Race Control per {title_driver} (ordinati per giro e data)."
+            f"{len(sorted_msgs)} messaggi Race Control per la sessione (ordinati per giro e data)."
         )
 
 
@@ -2087,7 +2078,7 @@ def on_show_driver_plots_click():
     status_var.set(
         f"Grafici, analisi gomme e tabella giri aggiornati per pilota {driver_number} ({title_driver}). "
         "La tabella pit stop mostra tutti i pit della sessione; la tab Meteo mostra l'evoluzione meteo. "
-        "Premi 'Recupera messaggi Race Control' per caricare i messaggi relativi al pilota."
+        "Premi 'Recupera messaggi Race Control' per caricare i messaggi della sessione."
     )
 
 
@@ -2106,26 +2097,16 @@ def on_fetch_race_control_click():
         )
         return
 
-    driver_number, driver_name = get_selected_driver_info()
-    if driver_number is None:
-        messagebox.showinfo(
-            "Info",
-            "Seleziona un pilota nella tabella dei risultati prima di recuperare i messaggi Race Control.",
-        )
-        return
-
-    title_driver = driver_name if driver_name else f"Driver {driver_number}"
-
     status_var.set(
-        f"Scarico messaggi Race Control per sessione {session_key}, pilota {driver_number}..."
+        f"Scarico messaggi Race Control per la sessione {session_key}..."
     )
     root.update_idletasks()
 
-    update_race_control_messages(session_key, driver_number, title_driver)
+    update_race_control_messages(session_key)
     plots_notebook.select(race_control_tab_frame)
 
     status_var.set(
-        f"Messaggi Race Control aggiornati per {title_driver} (sessione {session_key})."
+        f"Messaggi Race Control aggiornati per la sessione {session_key}."
     )
 
 
@@ -2632,7 +2613,7 @@ gap_pressure_tree.pack(fill="both", expand=True, padx=5, pady=4)
 # --- Contenuto tab Race Control --- #
 race_control_info_var = tk.StringVar(
     value=(
-        "Messaggi Race Control: seleziona una sessione Race/Sprint e un pilota, poi premi "
+        "Messaggi Race Control: seleziona una sessione Race/Sprint, poi premi "
         "'Recupera messaggi Race Control' per visualizzare i dettagli."
     )
 )
@@ -2813,9 +2794,6 @@ weather_info_var = tk.StringVar(
 weather_info_label = ttk.Label(weather_tab_frame, textvariable=weather_info_var, anchor="w")
 weather_info_label.pack(fill="x", pady=(4, 2), padx=5)
 
-weather_plot_frame = ttk.Frame(weather_tab_frame)
-weather_plot_frame.pack(fill="both", expand=True, padx=5)
-
 weather_summary_frame = ttk.LabelFrame(weather_tab_frame, text="Riepilogo meteo sessione")
 weather_summary_frame.pack(fill="x", padx=5, pady=(4, 2))
 
@@ -2841,11 +2819,23 @@ ttk.Label(weather_summary_frame, textvariable=weather_stats_vars["wind"], anchor
 weather_summary_frame.columnconfigure(0, weight=1)
 weather_summary_frame.columnconfigure(1, weight=1)
 
+weather_charts_container = ttk.Frame(weather_tab_frame)
+weather_charts_container.pack(fill="both", expand=True, padx=5, pady=(2, 5))
+
+weather_evolution_section = ttk.LabelFrame(
+    weather_charts_container,
+    text="Evoluzione temperatura asfalto / aria",
+)
+weather_evolution_section.grid(row=0, column=0, sticky="nsew", padx=(0, 4), pady=0)
+
+weather_plot_frame = ttk.Frame(weather_evolution_section)
+weather_plot_frame.pack(fill="both", expand=True, padx=5, pady=5)
+
 weather_perf_section = ttk.LabelFrame(
-    weather_tab_frame,
+    weather_charts_container,
     text="Meteo & prestazioni: correlazione track temp vs lap time",
 )
-weather_perf_section.pack(fill="both", expand=True, padx=5, pady=(4, 5))
+weather_perf_section.grid(row=0, column=1, sticky="nsew", padx=(4, 0), pady=0)
 
 weather_perf_info_var = tk.StringVar(
     value="Carica una sessione e seleziona un pilota per vedere la correlazione track temp vs lap time."
@@ -2854,11 +2844,15 @@ ttk.Label(
     weather_perf_section,
     textvariable=weather_perf_info_var,
     anchor="w",
-    wraplength=1200,
+    wraplength=600,
 ).pack(fill="x", padx=5, pady=(4, 2))
 
 weather_perf_plot_frame = ttk.Frame(weather_perf_section)
 weather_perf_plot_frame.pack(fill="both", expand=True, padx=5, pady=(0, 5))
+
+weather_charts_container.columnconfigure(0, weight=1)
+weather_charts_container.columnconfigure(1, weight=1)
+weather_charts_container.rowconfigure(0, weight=1)
 
 # --- Contenuto tab Statistiche piloti --- #
 stats_frame_inner = ttk.Frame(stats_tab_frame)
