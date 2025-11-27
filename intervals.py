@@ -3,7 +3,7 @@ import subprocess
 import tempfile
 import threading
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import filedialog, messagebox, ttk
 import urllib.request
 import urllib.error
 import json
@@ -52,6 +52,7 @@ team_radio_play_thread = None
 team_radio_play_process = None
 race_timeline_tree = None
 race_timeline_detail_var = None
+race_timeline_last_events = []
 
 # Impostazioni per identificare scia/aria pulita e momenti chiave
 SLIPSTREAM_THRESHOLD = 1.0
@@ -738,7 +739,8 @@ def on_fetch_team_radio_click():
 
 def clear_race_timeline_table():
     """Svuota la timeline di gara."""
-    global race_timeline_tree, race_timeline_detail_var
+    global race_timeline_tree, race_timeline_detail_var, race_timeline_last_events
+    race_timeline_last_events = []
     if race_timeline_tree is not None:
         for item in race_timeline_tree.get_children():
             race_timeline_tree.delete(item)
@@ -748,11 +750,56 @@ def clear_race_timeline_table():
         )
 
 
+def on_export_race_timeline_click():
+    """Esporta la timeline di gara in un file di testo."""
+    global race_timeline_last_events
+
+    if not race_timeline_last_events:
+        messagebox.showinfo(
+            "Export Timeline", "Genera prima la timeline di gara da esportare."
+        )
+        return
+
+    filepath = filedialog.asksaveasfilename(
+        defaultextension=".txt",
+        filetypes=[("File di testo", "*.txt"), ("Tutti i file", "*.*")],
+        title="Esporta Race Timeline",
+    )
+
+    if not filepath:
+        return
+
+    try:
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write("Race Timeline\n")
+            f.write("Timestamp\tGiro\tTipo\tDescrizione\tPilota/i\n")
+            for ev in race_timeline_last_events:
+                ts = ev.get("timestamp")
+                ts_str = (
+                    ts.strftime("%Y-%m-%d %H:%M:%S")
+                    if isinstance(ts, datetime)
+                    else (str(ts) if ts else "")
+                )
+                lap_val = ev.get("lap")
+                lap_str = str(lap_val) if isinstance(lap_val, int) else ""
+                f.write(
+                    f"{ts_str}\t{lap_str}\t{ev.get('type', '')}\t{ev.get('description', '')}\t{ev.get('drivers', '')}\n"
+                )
+        messagebox.showinfo(
+            "Export Timeline",
+            f"Timeline esportata in:\n{filepath}",
+        )
+    except OSError as e:
+        messagebox.showerror("Export Timeline", f"Impossibile salvare il file: {e}")
+
+
 def update_race_timeline_table(events):
     """Popola la tabella timeline con gli eventi ordinati."""
-    global race_timeline_tree, race_timeline_detail_var
+    global race_timeline_tree, race_timeline_detail_var, race_timeline_last_events
     if race_timeline_tree is None:
         return
+
+    race_timeline_last_events = events or []
 
     for item in race_timeline_tree.get_children():
         race_timeline_tree.delete(item)
@@ -3917,6 +3964,11 @@ ttk.Button(
     text="Genera Timeline Gara",
     command=on_generate_race_timeline_click,
 ).pack(side="left")
+ttk.Button(
+    timeline_buttons_frame,
+    text="Esporta Timeline",
+    command=on_export_race_timeline_click,
+).pack(side="left", padx=(6, 0))
 
 race_timeline_columns = ("timestamp", "lap", "type", "description", "drivers")
 race_timeline_tree = ttk.Treeview(
