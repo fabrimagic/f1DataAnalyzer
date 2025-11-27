@@ -1162,7 +1162,7 @@ def on_generate_race_timeline_click():
     )
 
     update_race_timeline_table(events)
-    plots_notebook.select(race_timeline_tab_frame)
+    plots_notebook.select(race_timeline_tab)
 
     if events:
         status_var.set(f"Timeline di gara generata con {len(events)} eventi.")
@@ -1660,7 +1660,7 @@ def on_compute_battle_pressure_click():
         results.append(metrics)
 
     update_battle_pressure_table(results)
-    plots_notebook.select(battle_pressure_tab_frame)
+    plots_notebook.select(battle_pressure_tab)
 
     if not results:
         status_var.set("Nessun dato intervals disponibile per calcolare il Battle/Pressure Index.")
@@ -2498,7 +2498,7 @@ def on_compute_session_stats_click():
             ),
         )
 
-    plots_notebook.select(stats_tab_frame)
+    plots_notebook.select(stats_tab)
 
     status_var.set(
         "Statistiche lap time per pilota calcolate. "
@@ -3382,7 +3382,7 @@ def on_compute_undercut_analysis_click():
         return
 
     update_pit_undercut_table(events)
-    plots_notebook.select(pit_strategy_tab_frame)
+    plots_notebook.select(pit_strategy_tab)
 
     if events:
         status_var.set(
@@ -3533,7 +3533,7 @@ def on_compute_pit_strategy_click():
         pit_strategy_canvas = pit_strategy_canvas_local
         pit_strategy_fig = pit_strategy_fig_local
 
-    plots_notebook.select(pit_strategy_tab_frame)
+    plots_notebook.select(pit_strategy_tab)
 
     status_var.set(
         "Analisi pit stop aggiornata: tabella riassuntiva per pilota e grafico pit stop per giro "
@@ -3578,7 +3578,7 @@ def on_compute_pit_window_click():
     update_pit_window_table(entries)
     update_pit_window_plot(entries, sc_vsc_laps)
 
-    plots_notebook.select(pit_strategy_tab_frame)
+    plots_notebook.select(pit_strategy_tab)
 
     if not entries:
         status_var.set(
@@ -4044,7 +4044,7 @@ def on_show_driver_plots_click():
 
     update_team_radio_table(session_key, driver_number, title_driver)
 
-    plots_notebook.select(gap_tab_frame)
+    plots_notebook.select(gap_tab)
 
     status_var.set(
         f"Grafici, analisi gomme e tabella giri aggiornati per pilota {driver_number} ({title_driver}). "
@@ -4075,7 +4075,7 @@ def on_fetch_race_control_click():
     root.update_idletasks()
 
     update_race_control_messages(session_key)
-    plots_notebook.select(race_control_tab_frame)
+    plots_notebook.select(race_control_tab)
 
     status_var.set(
         f"Messaggi Race Control aggiornati per la sessione {session_key}."
@@ -4088,8 +4088,12 @@ root = tk.Tk()
 root.title(
     "Full Gas Podcast - F1 Analyzer"
 )
-root.geometry("1500x950")
-root.minsize(1280, 850)
+screen_w = root.winfo_screenwidth()
+screen_h = root.winfo_screenheight()
+initial_w = min(1500, max(1100, int(screen_w * 0.9)))
+initial_h = min(950, max(780, int(screen_h * 0.9)))
+root.geometry(f"{initial_w}x{initial_h}")
+root.minsize(max(900, min(screen_w - 140, initial_w)), max(680, min(screen_h - 160, initial_h)))
 
 DARK_BG = "#0b1220"
 DARK_PANEL = "#111827"
@@ -4189,6 +4193,36 @@ def apply_dark_theme(app_root: tk.Tk):
     app_root.option_add("*TCombobox*Listbox*Foreground", TEXT_COLOR)
 
 
+def create_scrollable_tab(parent, padding=6, style="Card.TFrame"):
+    """Create a scrollable container for notebook tabs to avoid overflow."""
+
+    container = ttk.Frame(parent)
+    canvas = tk.Canvas(container, highlightthickness=0, background=DARK_BG)
+    vsb = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+    hsb = ttk.Scrollbar(container, orient="horizontal", command=canvas.xview)
+
+    canvas.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+
+    canvas.grid(row=0, column=0, sticky="nsew")
+    vsb.grid(row=0, column=1, sticky="ns")
+    hsb.grid(row=1, column=0, sticky="ew")
+
+    container.rowconfigure(0, weight=1)
+    container.columnconfigure(0, weight=1)
+
+    content = ttk.Frame(canvas, padding=padding, style=style)
+    window_id = canvas.create_window((0, 0), window=content, anchor="nw")
+
+    def _resize_content(event):
+        canvas.configure(scrollregion=canvas.bbox("all"))
+        canvas.itemconfigure(window_id, width=canvas.winfo_width())
+
+    content.bind("<Configure>", _resize_content)
+    canvas.bind("<Configure>", lambda e: canvas.itemconfigure(window_id, width=e.width))
+
+    return container, content
+
+
 apply_dark_theme(root)
 root.configure(bg=DARK_BG)
 
@@ -4214,63 +4248,23 @@ fetch_sessions_button.pack(side="left", padx=6)
 actions_frame = ttk.Frame(input_frame, style="Card.TFrame")
 actions_frame.pack(side="right", fill="x")
 
-fetch_results_button = ttk.Button(
-    actions_frame,
-    text="Mostra risultati sessione",
-    command=on_fetch_results_click,
-)
-fetch_results_button.grid(row=0, column=0, padx=4, pady=2, sticky="ew")
+actions = [
+    ("Mostra risultati sessione", on_fetch_results_click),
+    ("Grafici & giri pilota", on_show_driver_plots_click),
+    ("Statistiche lap time", on_compute_session_stats_click),
+    ("Pit stop & strategia", on_compute_pit_strategy_click),
+    ("Analisi undercut/overcut", on_compute_undercut_analysis_click),
+    ("Pit window & virtual position", on_compute_pit_window_click),
+    ("Race Control pilota", on_fetch_race_control_click),
+    ("Team radio pilota", on_fetch_team_radio_click),
+]
 
-plot_button = ttk.Button(
-    actions_frame,
-    text="Grafici & giri pilota",
-    command=on_show_driver_plots_click,
-)
-plot_button.grid(row=0, column=1, padx=4, pady=2, sticky="ew")
+for idx, (text, command) in enumerate(actions):
+    row, col = divmod(idx, 4)
+    btn = ttk.Button(actions_frame, text=text, command=command)
+    btn.grid(row=row, column=col, padx=4, pady=2, sticky="ew")
 
-stats_button = ttk.Button(
-    actions_frame,
-    text="Statistiche lap time",
-    command=on_compute_session_stats_click,
-)
-stats_button.grid(row=0, column=2, padx=4, pady=2, sticky="ew")
-
-pit_strategy_button = ttk.Button(
-    actions_frame,
-    text="Pit stop & strategia",
-    command=on_compute_pit_strategy_click,
-)
-pit_strategy_button.grid(row=0, column=3, padx=4, pady=2, sticky="ew")
-
-pit_undercut_button = ttk.Button(
-    actions_frame,
-    text="Analisi undercut/overcut",
-    command=on_compute_undercut_analysis_click,
-)
-pit_undercut_button.grid(row=0, column=4, padx=4, pady=2, sticky="ew")
-
-pit_window_button = ttk.Button(
-    actions_frame,
-    text="Pit window & virtual position",
-    command=on_compute_pit_window_click,
-)
-pit_window_button.grid(row=0, column=5, padx=4, pady=2, sticky="ew")
-
-race_control_action = ttk.Button(
-    actions_frame,
-    text="Race Control pilota",
-    command=on_fetch_race_control_click,
-)
-race_control_action.grid(row=0, column=6, padx=4, pady=2, sticky="ew")
-
-team_radio_button = ttk.Button(
-    actions_frame,
-    text="Team radio pilota",
-    command=on_fetch_team_radio_click,
-)
-team_radio_button.grid(row=0, column=7, padx=4, pady=2, sticky="ew")
-
-actions_frame.columnconfigure((0, 1, 2, 3, 4, 5, 6, 7), weight=1)
+actions_frame.columnconfigure((0, 1, 2, 3), weight=1)
 
 # --- Layout principale con paned window per mostrare tutte le sezioni --- #
 main_paned = ttk.Panedwindow(root, orient=tk.VERTICAL)
@@ -4542,25 +4536,25 @@ main_paned.add(plots_shell, weight=4)
 plots_notebook = ttk.Notebook(plots_shell)
 plots_notebook.pack(fill="both", expand=True, padx=4, pady=4)
 
-gap_tab_frame = ttk.Frame(plots_notebook, padding=6, style="Card.TFrame")
-battle_pressure_tab_frame = ttk.Frame(plots_notebook, padding=6, style="Card.TFrame")
-stints_tab_frame = ttk.Frame(plots_notebook, padding=6, style="Card.TFrame")
-race_control_tab_frame = ttk.Frame(plots_notebook, padding=6, style="Card.TFrame")
-team_radio_tab_frame = ttk.Frame(plots_notebook, padding=6, style="Card.TFrame")
-weather_tab_frame = ttk.Frame(plots_notebook, padding=6, style="Card.TFrame")
-stats_tab_frame = ttk.Frame(plots_notebook, padding=6, style="Card.TFrame")
-pit_strategy_tab_frame = ttk.Frame(plots_notebook, padding=6, style="Card.TFrame")
-race_timeline_tab_frame = ttk.Frame(plots_notebook, padding=6, style="Card.TFrame")
+gap_tab, gap_tab_frame = create_scrollable_tab(plots_notebook, padding=6, style="Card.TFrame")
+battle_pressure_tab, battle_pressure_tab_frame = create_scrollable_tab(plots_notebook, padding=6, style="Card.TFrame")
+stints_tab, stints_tab_frame = create_scrollable_tab(plots_notebook, padding=6, style="Card.TFrame")
+race_control_tab, race_control_tab_frame = create_scrollable_tab(plots_notebook, padding=6, style="Card.TFrame")
+team_radio_tab, team_radio_tab_frame = create_scrollable_tab(plots_notebook, padding=6, style="Card.TFrame")
+weather_tab, weather_tab_frame = create_scrollable_tab(plots_notebook, padding=6, style="Card.TFrame")
+stats_tab, stats_tab_frame = create_scrollable_tab(plots_notebook, padding=6, style="Card.TFrame")
+pit_strategy_tab, pit_strategy_tab_frame = create_scrollable_tab(plots_notebook, padding=6, style="Card.TFrame")
+race_timeline_tab, race_timeline_tab_frame = create_scrollable_tab(plots_notebook, padding=6, style="Card.TFrame")
 
-plots_notebook.add(gap_tab_frame, text="Grafico distacchi")
-plots_notebook.add(battle_pressure_tab_frame, text="Battaglie & Pressure Index")
-plots_notebook.add(stints_tab_frame, text="Gomme: mappa & analisi")
-plots_notebook.add(race_control_tab_frame, text="Race Control")
-plots_notebook.add(team_radio_tab_frame, text="Team Radio")
-plots_notebook.add(weather_tab_frame, text="Meteo sessione")
-plots_notebook.add(stats_tab_frame, text="Statistiche piloti")
-plots_notebook.add(pit_strategy_tab_frame, text="Pit stop & strategia")
-plots_notebook.add(race_timeline_tab_frame, text="Race Timeline")
+plots_notebook.add(gap_tab, text="Grafico distacchi")
+plots_notebook.add(battle_pressure_tab, text="Battaglie & Pressure Index")
+plots_notebook.add(stints_tab, text="Gomme: mappa & analisi")
+plots_notebook.add(race_control_tab, text="Race Control")
+plots_notebook.add(team_radio_tab, text="Team Radio")
+plots_notebook.add(weather_tab, text="Meteo sessione")
+plots_notebook.add(stats_tab, text="Statistiche piloti")
+plots_notebook.add(pit_strategy_tab, text="Pit stop & strategia")
+plots_notebook.add(race_timeline_tab, text="Race Timeline")
 
 # --- Contenuto tab Battaglie & Pressure Index --- #
 battle_pressure_info_var = tk.StringVar(
@@ -4645,10 +4639,18 @@ battle_pressure_vsb = ttk.Scrollbar(
     orient="vertical",
     command=battle_pressure_tree.yview,
 )
-battle_pressure_tree.configure(yscrollcommand=battle_pressure_vsb.set)
+battle_pressure_hsb = ttk.Scrollbar(
+    battle_pressure_table_frame,
+    orient="horizontal",
+    command=battle_pressure_tree.xview,
+)
+battle_pressure_tree.configure(
+    yscrollcommand=battle_pressure_vsb.set, xscrollcommand=battle_pressure_hsb.set
+)
 
 battle_pressure_tree.grid(row=0, column=0, sticky="nsew")
 battle_pressure_vsb.grid(row=0, column=1, sticky="ns")
+battle_pressure_hsb.grid(row=1, column=0, sticky="ew")
 
 battle_pressure_table_frame.rowconfigure(0, weight=1)
 battle_pressure_table_frame.columnconfigure(0, weight=1)
@@ -4779,10 +4781,16 @@ race_control_tree.column("message", width=800, anchor="w")
 race_control_vsb = ttk.Scrollbar(
     race_control_frame, orient="vertical", command=race_control_tree.yview
 )
-race_control_tree.configure(yscrollcommand=race_control_vsb.set)
+race_control_hsb = ttk.Scrollbar(
+    race_control_frame, orient="horizontal", command=race_control_tree.xview
+)
+race_control_tree.configure(
+    yscrollcommand=race_control_vsb.set, xscrollcommand=race_control_hsb.set
+)
 
 race_control_tree.grid(row=0, column=0, sticky="nsew")
 race_control_vsb.grid(row=0, column=1, sticky="ns")
+race_control_hsb.grid(row=1, column=0, sticky="ew")
 
 race_control_frame.rowconfigure(0, weight=1)
 race_control_frame.columnconfigure(0, weight=1)
@@ -4867,9 +4875,12 @@ ttk.Button(
     command=on_export_race_timeline_click,
 ).pack(side="left", padx=(6, 0))
 
+race_timeline_table = ttk.Frame(race_timeline_tab_frame, style="Card.TFrame")
+race_timeline_table.pack(fill="both", expand=True, padx=5, pady=5)
+
 race_timeline_columns = ("timestamp", "lap", "type", "description", "drivers")
 race_timeline_tree = ttk.Treeview(
-    race_timeline_tab_frame,
+    race_timeline_table,
     columns=race_timeline_columns,
     show="headings",
     height=14,
@@ -4888,12 +4899,21 @@ race_timeline_tree.column("description", width=780, anchor="w")
 race_timeline_tree.column("drivers", width=170, anchor="w")
 
 race_timeline_vsb = ttk.Scrollbar(
-    race_timeline_tab_frame, orient="vertical", command=race_timeline_tree.yview
+    race_timeline_table, orient="vertical", command=race_timeline_tree.yview
 )
-race_timeline_tree.configure(yscrollcommand=race_timeline_vsb.set)
+race_timeline_hsb = ttk.Scrollbar(
+    race_timeline_table, orient="horizontal", command=race_timeline_tree.xview
+)
+race_timeline_tree.configure(
+    yscrollcommand=race_timeline_vsb.set, xscrollcommand=race_timeline_hsb.set
+)
 
-race_timeline_tree.pack(side="left", fill="both", expand=True, padx=(5, 0), pady=5)
-race_timeline_vsb.pack(side="right", fill="y", padx=(0, 5), pady=5)
+race_timeline_tree.grid(row=0, column=0, sticky="nsew")
+race_timeline_vsb.grid(row=0, column=1, sticky="ns")
+race_timeline_hsb.grid(row=1, column=0, sticky="ew")
+
+race_timeline_table.rowconfigure(0, weight=1)
+race_timeline_table.columnconfigure(0, weight=1)
 
 race_timeline_tree.bind("<<TreeviewSelect>>", on_race_timeline_select)
 
