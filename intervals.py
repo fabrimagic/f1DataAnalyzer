@@ -19,7 +19,7 @@ API_LAPS_URL = "https://api.openf1.org/v1/laps?session_key={session_key}&driver_
 API_PIT_URL = "https://api.openf1.org/v1/pit?session_key={session_key}"
 API_WEATHER_URL = "https://api.openf1.org/v1/weather?session_key={session_key}"
 API_RACE_CONTROL_URL = (
-    "https://api.openf1.org/v1/race_control?session_key={session_key}&driver_number={driver_number}"
+    "https://api.openf1.org/v1/race_control?driver_number={driver_number}&session_key={session_key}"
 )
 
 # Cache per i nomi dei piloti: chiave = (session_key, driver_number)
