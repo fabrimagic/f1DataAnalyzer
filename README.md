@@ -13,11 +13,14 @@ Un'applicazione desktop Tkinter per esplorare i dati delle sessioni di Formula 1
 ## Requisiti
 - Python 3.10 o superiore.
 - Tkinter (generalmente incluso con le installazioni standard di Python).
-- Matplotlib (`pip install matplotlib`).
+- Dipendenze Python installabili con `pip install -r requirements.txt`.
 - Un lettore audio/video CLI opzionale come `mpv` o `ffplay` se si desidera riprodurre i messaggi radio.
 
 ## Esecuzione
-1. Clona il repository e installa le dipendenze richieste.
+1. Clona il repository e installa le dipendenze richieste:
+   ```bash
+   pip install -r requirements.txt
+   ```
 2. Avvia l'applicazione con:
    ```bash
    python intervals.py
