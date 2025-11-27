@@ -12,6 +12,8 @@ import math
 from datetime import datetime
 from shutil import which
 
+import pandas as pd
+
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
@@ -98,6 +100,8 @@ stats_tree = None
 current_stints_data = []
 current_laps_data = []
 current_laps_session_key = None
+current_results_session_key = None
+current_pit_session_key = None
 
 # Riferimenti GUI per sezione gomme
 stints_mode_var = None
@@ -109,6 +113,20 @@ current_stints_for_combo = []
 # Dati correnti per pit & risultati (per analisi strategia)
 current_pit_data = []
 current_results_data = []
+
+# Cache per export e dati caricati
+intervals_cache = {}
+stints_cache = {}
+laps_cache = {}
+pit_cache = {}
+overtakes_cache = {}
+race_control_cache = {}
+race_control_session_key = None
+battle_pressure_last_results = []
+battle_pressure_session_key = None
+session_stats_last_results = []
+session_stats_session_key = None
+race_timeline_last_session_key = None
 
 # Pit stop & strategia
 pit_stats_tree = None
@@ -155,6 +173,19 @@ def fetch_list_from_api(url: str, error_context: str):
     if not isinstance(data, list):
         raise RuntimeError(f"Formato JSON inatteso {error_context}.")
     return data
+
+
+def _cache_driver_dataset(cache: dict, session_key: int, driver_number, data_list):
+    """Salva i dati per (session_key, driver_number) in una cache dizionario."""
+    if not isinstance(data_list, list):
+        return
+    try:
+        skey = int(session_key)
+        dnum = int(driver_number)
+    except (ValueError, TypeError):
+        return
+
+    cache.setdefault(skey, {})[dnum] = data_list
 
 
 def parse_driver_number(driver_number, error_context: str):
@@ -238,7 +269,9 @@ def fetch_intervals(session_key: int, driver_number):
     dn_key = parse_driver_number(driver_number, "intervals")
 
     url = API_INTERVALS_URL.format(session_key=session_key, driver_number=dn_key)
-    return fetch_list_from_api(url, "per i dati intervals")
+    data = fetch_list_from_api(url, "per i dati intervals")
+    _cache_driver_dataset(intervals_cache, session_key, dn_key, data)
+    return data
 
 
 def fetch_stints(session_key: int, driver_number):
@@ -246,7 +279,9 @@ def fetch_stints(session_key: int, driver_number):
     dn_key = parse_driver_number(driver_number, "stints")
 
     url = API_STINTS_URL.format(session_key=session_key, driver_number=dn_key)
-    return fetch_list_from_api(url, "per i dati stints")
+    data = fetch_list_from_api(url, "per i dati stints")
+    _cache_driver_dataset(stints_cache, session_key, dn_key, data)
+    return data
 
 
 def fetch_laps(session_key: int, driver_number):
@@ -254,13 +289,17 @@ def fetch_laps(session_key: int, driver_number):
     dn_key = parse_driver_number(driver_number, "laps")
 
     url = API_LAPS_URL.format(session_key=session_key, driver_number=dn_key)
-    return fetch_list_from_api(url, "per i dati laps")
+    data = fetch_list_from_api(url, "per i dati laps")
+    _cache_driver_dataset(laps_cache, session_key, dn_key, data)
+    return data
 
 
 def fetch_pit_stops(session_key: int):
     """Elenco pit stop per la sessione (tutti i piloti)."""
     url = API_PIT_URL.format(session_key=session_key)
-    return fetch_list_from_api(url, "per i dati pit")
+    data = fetch_list_from_api(url, "per i dati pit")
+    pit_cache[session_key] = data if isinstance(data, list) else []
+    return data
 
 
 def fetch_weather(session_key: int):
@@ -272,7 +311,9 @@ def fetch_weather(session_key: int):
 def fetch_race_control_messages(session_key: int):
     """Messaggi Race Control per l'intera sessione."""
     url = API_RACE_CONTROL_URL.format(session_key=session_key)
-    return fetch_list_from_api(url, "per i dati Race Control")
+    data = fetch_list_from_api(url, "per i dati Race Control")
+    race_control_cache[session_key] = data if isinstance(data, list) else []
+    return data
 
 
 def fetch_team_radio(session_key: int, driver_number):
@@ -286,7 +327,9 @@ def fetch_team_radio(session_key: int, driver_number):
 def fetch_overtakes(session_key: int):
     """Sorpassi rilevati automaticamente per la sessione."""
     url = API_OVERTAKES_URL.format(session_key=session_key)
-    return fetch_list_from_api(url, "per i dati sui sorpassi")
+    data = fetch_list_from_api(url, "per i dati sui sorpassi")
+    overtakes_cache[session_key] = data if isinstance(data, list) else []
+    return data
 
 
 def set_team_radio_status(message: str):
@@ -844,7 +887,7 @@ def on_battle_pressure_select(event=None):
 
 def update_race_control_messages(session_key: int):
     """Scarica e popola i messaggi Race Control per l'intera sessione."""
-    global race_control_tree, race_control_info_var
+    global race_control_tree, race_control_info_var, race_control_session_key
 
     clear_race_control_table()
 
@@ -879,6 +922,9 @@ def update_race_control_messages(session_key: int):
         )
     except Exception:
         sorted_msgs = messages
+
+    race_control_cache[session_key] = sorted_msgs if isinstance(sorted_msgs, list) else []
+    race_control_session_key = session_key
 
     for msg in sorted_msgs:
         raw_date = msg.get("date", "")
@@ -1005,8 +1051,9 @@ def on_fetch_team_radio_click():
 
 def clear_race_timeline_table():
     """Svuota la timeline di gara."""
-    global race_timeline_tree, race_timeline_detail_var, race_timeline_last_events
+    global race_timeline_tree, race_timeline_detail_var, race_timeline_last_events, race_timeline_last_session_key
     race_timeline_last_events = []
+    race_timeline_last_session_key = None
     if race_timeline_tree is not None:
         for item in race_timeline_tree.get_children():
             race_timeline_tree.delete(item)
@@ -1063,13 +1110,321 @@ def on_export_race_timeline_click():
         messagebox.showerror("Export Timeline", f"Impossibile salvare il file: {e}")
 
 
+def on_export_datasets_click():
+    """Esporta i dataset già caricati in file Parquet senza nuove chiamate API."""
+
+    session_key, _, _ = get_selected_session_info()
+    if session_key is None:
+        messagebox.showinfo("Info", "Seleziona prima una sessione da cui esportare i dataset.")
+        return
+
+    dest_dir = filedialog.askdirectory(title="Seleziona la cartella di destinazione per l'export")
+    if not dest_dir:
+        return
+
+    if not os.path.isdir(dest_dir):
+        messagebox.showerror("Export datasets", "La cartella selezionata non esiste o non è accessibile.")
+        return
+
+    exports_done = []
+    errors = []
+
+    def save_parquet(records, filename, missing_reason):
+        if not records:
+            errors.append(missing_reason)
+            return
+        try:
+            filepath = os.path.join(dest_dir, filename)
+            pd.DataFrame(records).to_parquet(filepath, index=False)
+            exports_done.append(filepath)
+        except Exception as e:
+            errors.append(f"{filename}: {e}")
+
+    def nearest_weather(dt_obj, samples):
+        if not samples or dt_obj is None:
+            return None
+        return min(samples, key=lambda s: abs((dt_obj - s["timestamp"]).total_seconds()))
+
+    weather_records = []
+    weather_samples = []
+    if weather_last_session_key == session_key and weather_last_data:
+        weather_points = _build_weather_points_with_phase_markers()
+        first_rain_idx = next((w.get("idx") for w in weather_points if w.get("rainfall", 0) > 0), None)
+        transition_range = (0, -1)
+        first_rain_humidity = None
+        if first_rain_idx is not None:
+            transition_range = (max(0, first_rain_idx - 2), first_rain_idx + 2)
+            first_match = next((w for w in weather_points if w.get("idx") == first_rain_idx), None)
+            first_rain_humidity = first_match.get("humidity") if first_match else None
+
+        for idx, sample in enumerate(weather_last_data):
+            dt = parse_iso_datetime(sample.get("date", ""))
+            if dt is None:
+                continue
+            phase = _classify_weather_phase(
+                idx,
+                sample.get("rainfall", 0) or 0,
+                sample.get("humidity"),
+                first_rain_idx,
+                transition_range,
+                first_rain_humidity,
+            )
+            timestamp_iso = dt.isoformat()
+            record = {
+                "timestamp": timestamp_iso,
+                "track_temperature": sample.get("track_temperature"),
+                "air_temperature": sample.get("air_temperature"),
+                "humidity": sample.get("humidity"),
+                "wind_speed": sample.get("wind_speed"),
+                "rainfall": sample.get("rainfall"),
+                "weather_phase": phase,
+            }
+            weather_records.append(record)
+            weather_samples.append({"timestamp": dt, **{k: v for k, v in record.items() if k != "timestamp"}})
+
+    session_intervals = intervals_cache.get(session_key, {})
+    intervals_records = []
+    for driver_num, entries in session_intervals.items():
+        for idx, entry in enumerate(entries, start=1):
+            lap_num = entry.get("lap_number")
+            if not isinstance(lap_num, int):
+                lap_num = idx
+            intervals_records.append(
+                {
+                    "driver_number": driver_num,
+                    "lap_number": lap_num,
+                    "timestamp": entry.get("date") or entry.get("date_time"),
+                    "gap_to_leader": entry.get("gap_to_leader"),
+                    "interval": entry.get("interval"),
+                    "position": entry.get("position"),
+                }
+            )
+
+    session_laps = laps_cache.get(session_key, {})
+    session_stints = stints_cache.get(session_key, {})
+
+    laps_records = []
+    for driver_num, laps in session_laps.items():
+        interval_map = {}
+        if driver_num in session_intervals:
+            for idx, entry in enumerate(session_intervals.get(driver_num, []), start=1):
+                lap_idx = entry.get("lap_number")
+                if not isinstance(lap_idx, int):
+                    lap_idx = idx
+                interval_map[lap_idx] = entry
+
+        stint_compounds = {}
+        for stint in session_stints.get(driver_num, []):
+            lap_start = stint.get("lap_start")
+            lap_end = stint.get("lap_end")
+            compound = stint.get("compound")
+            if not isinstance(lap_start, int) or not isinstance(lap_end, int):
+                continue
+            for lap_idx in range(lap_start, lap_end + 1):
+                stint_compounds[lap_idx] = compound
+
+        for lap in laps:
+            lap_num = lap.get("lap_number")
+            if not isinstance(lap_num, int):
+                continue
+            lap_dt = parse_iso_datetime(lap.get("date_start", ""))
+            weather_match = nearest_weather(lap_dt, weather_samples)
+            interval_entry = interval_map.get(lap_num, {})
+
+            laps_records.append(
+                {
+                    "driver_number": driver_num,
+                    "lap_number": lap_num,
+                    "lap_duration": lap.get("lap_duration"),
+                    "position": interval_entry.get("position") or lap.get("position"),
+                    "gap_to_leader": interval_entry.get("gap_to_leader"),
+                    "interval": interval_entry.get("interval"),
+                    "compound": stint_compounds.get(lap_num),
+                    "weather_track_temp": weather_match.get("track_temperature") if weather_match else None,
+                    "weather_air_temp": weather_match.get("air_temperature") if weather_match else None,
+                    "weather_humidity": weather_match.get("humidity") if weather_match else None,
+                    "weather_wind_speed": weather_match.get("wind_speed") if weather_match else None,
+                    "weather_rainfall": weather_match.get("rainfall") if weather_match else None,
+                    "weather_phase": weather_match.get("weather_phase") if weather_match else None,
+                }
+            )
+
+    stints_records = []
+    for driver_num, stints in session_stints.items():
+        lap_times_by_num = {
+            lap.get("lap_number"): lap.get("lap_duration")
+            for lap in session_laps.get(driver_num, [])
+            if isinstance(lap.get("lap_number"), int) and isinstance(lap.get("lap_duration"), (int, float)) and not lap.get("is_pit_out_lap", False)
+        }
+
+        for stint in stints:
+            lap_start = stint.get("lap_start")
+            lap_end = stint.get("lap_end")
+            if not isinstance(lap_start, int) or not isinstance(lap_end, int):
+                continue
+            stint_laps = [
+                lap_times_by_num.get(idx)
+                for idx in range(lap_start, lap_end + 1)
+                if isinstance(lap_times_by_num.get(idx), (int, float))
+            ]
+            stint_len = len(stint_laps)
+            avg_val = sum(stint_laps) / stint_len if stint_len else None
+            best_val = min(stint_laps) if stint_laps else None
+            std_val = None
+            if stint_len:
+                mean_val = avg_val if isinstance(avg_val, (int, float)) else 0
+                std_val = math.sqrt(sum((t - mean_val) ** 2 for t in stint_laps) / stint_len) if stint_len else None
+            degradation_delta = None
+            if len(stint_laps) >= 2:
+                degradation_delta = stint_laps[-1] - stint_laps[0]
+
+            stints_records.append(
+                {
+                    "driver_number": driver_num,
+                    "stint_id": stint.get("stint_number"),
+                    "compound": stint.get("compound"),
+                    "lap_start": lap_start,
+                    "lap_end": lap_end,
+                    "laps_in_stint": stint_len,
+                    "avg_lap": avg_val,
+                    "best_lap": best_val,
+                    "std_dev": std_val,
+                    "degradation_delta": degradation_delta,
+                }
+            )
+
+    pits_data = pit_cache.get(session_key) or ([] if current_pit_session_key != session_key else current_pit_data)
+    pit_records = []
+    for pit in pits_data:
+        pit_records.append(
+            {
+                "driver_number": pit.get("driver_number"),
+                "lap_pit": pit.get("lap_number"),
+                "pit_duration": pit.get("pit_duration"),
+                "compound_in": pit.get("compound_in"),
+                "compound_out": pit.get("compound_out"),
+                "position_pre_pit": pit.get("position_pre_pit"),
+                "position_post_pit": pit.get("position_post_pit"),
+            }
+        )
+
+    overtakes_records = [
+        {
+            "timestamp": ot.get("date"),
+            "overtaking_driver_number": ot.get("overtaking_driver_number"),
+            "overtaken_driver_number": ot.get("overtaken_driver_number"),
+            "lap_number": ot.get("lap_number"),
+            "position": ot.get("position"),
+        }
+        for ot in overtakes_cache.get(session_key, [])
+    ]
+
+    race_control_records = []
+    for msg in race_control_cache.get(session_key, []):
+        race_control_records.append(
+            {
+                "timestamp": msg.get("date"),
+                "lap_number": msg.get("lap_number"),
+                "category": msg.get("category"),
+                "flag": msg.get("flag"),
+                "scope": msg.get("scope"),
+                "message": msg.get("message"),
+            }
+        )
+
+    battle_pressure_records = []
+    if battle_pressure_session_key == session_key:
+        for res in battle_pressure_last_results or []:
+            battle_pressure_records.append(
+                {
+                    "driver_number": res.get("driver_number"),
+                    "attack_laps": res.get("attack_laps"),
+                    "clean_laps": res.get("clean_laps"),
+                    "pressure_delta": res.get("pressure_delta"),
+                    "defense_delta": res.get("defense_delta"),
+                    "pressure_stints": res.get("pressure_stints"),
+                    "defense_segments": res.get("defense_segments"),
+                    "overtakes_made": res.get("overtakes_made"),
+                    "overtakes_suffered": res.get("overtakes_suffered"),
+                }
+            )
+
+    session_stats_records = []
+    if session_stats_session_key == session_key:
+        best_session = None
+        for rec in session_stats_last_results or []:
+            best_val = rec.get("best")
+            if isinstance(best_val, (int, float)) and (best_session is None or best_val < best_session):
+                best_session = best_val
+        for rec in session_stats_last_results or []:
+            gap_best = None
+            best_val = rec.get("best")
+            if isinstance(best_val, (int, float)) and isinstance(best_session, (int, float)):
+                gap_best = best_val - best_session
+            session_stats_records.append(
+                {
+                    "position": rec.get("position"),
+                    "driver_number": rec.get("driver_number"),
+                    "driver_name": rec.get("driver_name"),
+                    "team_name": rec.get("team_name"),
+                    "laps_used": rec.get("laps_used"),
+                    "avg_lap": rec.get("avg"),
+                    "std_dev": rec.get("std"),
+                    "best_lap": rec.get("best"),
+                    "gap_best_session": gap_best,
+                }
+            )
+
+    race_timeline_records = []
+    if race_timeline_last_session_key == session_key:
+        for ev in race_timeline_last_events or []:
+            ts = ev.get("timestamp")
+            ts_val = ts.isoformat() if isinstance(ts, datetime) else ts
+            race_timeline_records.append(
+                {
+                    "timestamp": ts_val,
+                    "lap": ev.get("lap"),
+                    "type": ev.get("type"),
+                    "description": ev.get("description"),
+                    "drivers": ev.get("drivers"),
+                }
+            )
+
+    save_parquet(laps_records, "laps.parquet", "Lap dataset non disponibile: carica i giri dei piloti prima di esportare.")
+    save_parquet(intervals_records, "intervals.parquet", "Dataset intervals mancante: apri i grafici distacchi o Battle/Pressure per avere i dati.")
+    save_parquet(stints_records, "stints.parquet", "Dati stint non disponibili: carica gli stint di almeno un pilota.")
+    save_parquet(pit_records, "pit_stops.parquet", "Pit stop non caricati: recupera prima i pit stop della sessione.")
+    save_parquet(overtakes_records, "overtakes.parquet", "Sorpassi non disponibili: calcola Battle/Pressure o Timeline per scaricarli.")
+    save_parquet(race_control_records, "race_control.parquet", "Messaggi Race Control non presenti: usa l'apposito pulsante per scaricarli.")
+    save_parquet(weather_records, "weather.parquet", "Dati meteo mancanti: scarica il meteo della sessione prima dell'export.")
+    save_parquet(battle_pressure_records, "battle_pressure.parquet", "Calcola il Battle/Pressure Index per esportarne i valori.")
+    save_parquet(session_stats_records, "session_stats.parquet", "Statistiche lap time mancanti: esegui il calcolo prima di esportare.")
+    save_parquet(race_timeline_records, "race_timeline.parquet", "Race timeline non disponibile: genera la timeline prima di esportarla.")
+
+    if exports_done and not errors:
+        message = "\n".join(["Dataset esportati:", *exports_done])
+        messagebox.showinfo("Export datasets", message)
+    elif exports_done:
+        message = "\n".join(["Dataset esportati:", *exports_done, "", "Non esportati:", *errors])
+        messagebox.showwarning("Export datasets", message)
+    else:
+        messagebox.showerror(
+            "Export datasets",
+            ("Nessun dataset esportato. " + " ".join(errors))
+            if errors
+            else "Dati non disponibili per l'export.",
+        )
+
+
 def update_race_timeline_table(events):
     """Popola la tabella timeline con gli eventi ordinati."""
-    global race_timeline_tree, race_timeline_detail_var, race_timeline_last_events
+    global race_timeline_tree, race_timeline_detail_var, race_timeline_last_events, race_timeline_last_session_key
     if race_timeline_tree is None:
         return
 
     race_timeline_last_events = events or []
+    session_key, _, _ = get_selected_session_info()
+    race_timeline_last_session_key = session_key
 
     for item in race_timeline_tree.get_children():
         race_timeline_tree.delete(item)
@@ -1610,7 +1965,7 @@ def compute_race_timeline(
 
 def on_compute_battle_pressure_click():
     """Callback per calcolare il Battle / Pressure Index per i piloti della sessione."""
-    global current_results_data
+    global current_results_data, battle_pressure_last_results, battle_pressure_session_key
 
     session_key, session_type, _ = get_selected_session_info()
     if session_key is None:
@@ -1663,6 +2018,9 @@ def on_compute_battle_pressure_click():
 
         metrics.update({"driver_name": driver_name, "team_name": team_name})
         results.append(metrics)
+
+    battle_pressure_last_results = results
+    battle_pressure_session_key = session_key
 
     update_battle_pressure_table(results)
     plots_notebook.select(battle_pressure_tab)
@@ -2351,7 +2709,7 @@ def on_compute_session_stats_click():
       - Miglior giro
       - Gap dal miglior giro assoluto della sessione
     """
-    global stats_tree
+    global stats_tree, session_stats_last_results, session_stats_session_key
 
     session_key, session_type, meeting_key = get_selected_session_info()
     if session_key is None:
@@ -2470,6 +2828,9 @@ def on_compute_session_stats_click():
 
         if best_lap_session is None or best_val < best_lap_session:
             best_lap_session = best_val
+
+    session_stats_last_results = stats_per_driver
+    session_stats_session_key = session_key
 
     for s in stats_per_driver:
         laps_used = s["laps_used"]
@@ -3666,6 +4027,7 @@ def on_fetch_sessions_click():
 def on_fetch_results_click(event=None):
     """Carica risultati, pit stop (se Race/Sprint) e meteo sessione."""
     global DRIVER_CACHE, DRIVER_PROFILE_CACHE, current_pit_data, current_results_data
+    global current_results_session_key, current_pit_session_key
     DRIVER_CACHE = {}
     DRIVER_PROFILE_CACHE = {}
     clear_driver_plots()
@@ -3676,6 +4038,8 @@ def on_fetch_results_click(event=None):
 
     current_pit_data = []
     current_results_data = []
+    current_results_session_key = None
+    current_pit_session_key = None
 
     session_key, session_type, meeting_key = get_selected_session_info()
     if session_key is None:
@@ -3712,6 +4076,7 @@ def on_fetch_results_click(event=None):
         results_sorted = results
 
     current_results_data = results_sorted
+    current_results_session_key = session_key
 
     for r in results_sorted:
         position = r.get("position", "")
@@ -3780,6 +4145,7 @@ def on_fetch_results_click(event=None):
             pit_data = []
 
         current_pit_data = pit_data if isinstance(pit_data, list) else []
+        current_pit_session_key = session_key
 
         if pit_data:
             try:
@@ -4262,6 +4628,7 @@ actions = [
     ("Pit window & virtual position", on_compute_pit_window_click),
     ("Race Control pilota", on_fetch_race_control_click),
     ("Team radio pilota", on_fetch_team_radio_click),
+    ("Export datasets", on_export_datasets_click),
 ]
 
 for idx, (text, command) in enumerate(actions):
