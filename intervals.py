@@ -385,7 +385,8 @@ def clear_race_control_table():
 
     if race_control_info_var is not None:
         race_control_info_var.set(
-            "Messaggi Race Control: seleziona una sessione Race/Sprint e un pilota per visualizzare i dettagli."
+            "Messaggi Race Control: seleziona una sessione Race/Sprint e un pilota, poi premi "
+            "'Recupera messaggi Race Control' per visualizzare i dettagli."
         )
 
 
@@ -1870,6 +1871,7 @@ def on_show_driver_plots_click():
       - grafico stint gomme (mappa + analisi)
       - tabella giri
       - riassunto stint
+    Il caricamento dei messaggi Race Control avviene su richiesta tramite pulsante dedicato.
     """
     global gap_plot_canvas, stints_plot_canvas
     global gap_fig, gap_ax, gap_click_cid, gap_click_data
@@ -1896,203 +1898,234 @@ def on_show_driver_plots_click():
     for item in laps_tree.get_children():
         laps_tree.delete(item)
 
+    # --- Grafico distacchi --- #
+    status_var.set(
+        f"Scarico dati di intervallo per sessione {session_key}, pilota {driver_number}..."
+    )
+    root.update_idletasks()
+
     try:
-        # --- Grafico distacchi --- #
-        status_var.set(
-            f"Scarico dati di intervallo per sessione {session_key}, pilota {driver_number}..."
+        intervals = fetch_intervals(session_key, driver_number)
+    except RuntimeError as e:
+        status_var.set("Errore durante il recupero dei dati di intervallo.")
+        messagebox.showerror("Errore", str(e))
+        intervals = []
+
+    if intervals:
+        laps_idx = []
+        gaps_leader = []
+        gaps_prev = []
+
+        for idx, entry in enumerate(intervals, start=1):
+            laps_idx.append(idx)
+            gap_leader = entry.get("gap_to_leader", None)
+            gaps_leader.append(gap_leader if isinstance(gap_leader, (int, float)) else None)
+            interval_val = entry.get("interval", None)
+            gaps_prev.append(interval_val if isinstance(interval_val, (int, float)) else None)
+
+        fig_gap = Figure(figsize=(6, 3.2))
+        ax_gap = fig_gap.add_subplot(111)
+
+        ax_gap.plot(laps_idx, gaps_leader, marker="o", label="Gap dal leader (s)")
+        ax_gap.plot(
+            laps_idx, gaps_prev, marker="o", linestyle="--", label="Gap dal pilota davanti (s)"
         )
-        root.update_idletasks()
 
-        try:
-            intervals = fetch_intervals(session_key, driver_number)
-        except RuntimeError as e:
-            status_var.set("Errore durante il recupero dei dati di intervallo.")
-            messagebox.showerror("Errore", str(e))
-            intervals = []
-
-        if intervals:
-            laps_idx = []
-            gaps_leader = []
-            gaps_prev = []
-
-            for idx, entry in enumerate(intervals, start=1):
-                laps_idx.append(idx)
-                gap_leader = entry.get("gap_to_leader", None)
-                gaps_leader.append(gap_leader if isinstance(gap_leader, (int, float)) else None)
-                interval_val = entry.get("interval", None)
-                gaps_prev.append(interval_val if isinstance(interval_val, (int, float)) else None)
-
-            fig_gap = Figure(figsize=(6, 3.2))
-            ax_gap = fig_gap.add_subplot(111)
-
-            ax_gap.plot(laps_idx, gaps_leader, marker="o", label="Gap dal leader (s)")
-            ax_gap.plot(
-                laps_idx, gaps_prev, marker="o", linestyle="--", label="Gap dal pilota davanti (s)"
+        ax_gap.set_xlabel("Giro (indice dei dati intervals)")
+        ax_gap.set_ylabel("Distacco (secondi)")
+        ax_gap.set_title(f"Distacchi giro per giro - {title_driver}")
+        ax_gap.grid(True)
+        # Statistiche scia/aria pulita e tratti di pressione
+        in_scia_pct, aria_pulita_pct = compute_slipstream_stats(gaps_prev)
+        if gap_slipstream_var is not None:
+            gap_slipstream_var.set(
+                f"In scia: {in_scia_pct:.1f}% | Aria pulita: {aria_pulita_pct:.1f}%"
             )
 
-            ax_gap.set_xlabel("Giro (indice dei dati intervals)")
-            ax_gap.set_ylabel("Distacco (secondi)")
-            ax_gap.set_title(f"Distacchi giro per giro - {title_driver}")
-            ax_gap.grid(True)
-            # Statistiche scia/aria pulita e tratti di pressione
-            in_scia_pct, aria_pulita_pct = compute_slipstream_stats(gaps_prev)
-            if gap_slipstream_var is not None:
-                gap_slipstream_var.set(
-                    f"In scia: {in_scia_pct:.1f}% | Aria pulita: {aria_pulita_pct:.1f}%"
-                )
+        pressure_segments = find_pressure_stints(laps_idx, gaps_leader, gaps_prev)
+        update_pressure_table(pressure_segments)
 
-            pressure_segments = find_pressure_stints(laps_idx, gaps_leader, gaps_prev)
-            update_pressure_table(pressure_segments)
-
-            marker_styles = {
-                "Avvicinamento": {"color": "tab:green", "marker": "^"},
-                "Allontanamento": {"color": "tab:red", "marker": "v"},
-            }
-            used_labels = set()
-            for seg in pressure_segments:
-                style = marker_styles.get(seg["trend"], {})
-                y_val = seg.get("marker_y")
-                if y_val is None:
-                    continue
-                label_key = f"{seg['trend']} ({seg['metric']})"
-                label = None if label_key in used_labels else label_key
-                used_labels.add(label_key)
-                ax_gap.scatter(
-                    seg["marker_x"],
-                    y_val,
-                    color=style.get("color", "black"),
-                    marker=style.get("marker", "o"),
-                    s=70,
-                    zorder=3,
-                    label=label,
-                )
-
-            handles, labels = ax_gap.get_legend_handles_labels()
-            ax_gap.legend(handles, labels)
-
-            global gap_plot_canvas, gap_fig, gap_ax, gap_click_cid, gap_click_data
-            gap_plot_canvas = FigureCanvasTkAgg(fig_gap, master=gap_plot_frame)
-            gap_plot_canvas.get_tk_widget().pack(fill="both", expand=True)
-            gap_plot_canvas.draw()
-
-            gap_fig = fig_gap
-            gap_ax = ax_gap
-            gap_click_data = {
-                "laps": laps_idx,
-                "gap_leader": gaps_leader,
-                "gap_prev": gaps_prev,
-            }
-            gap_click_cid = fig_gap.canvas.mpl_connect("button_press_event", on_gap_plot_click)
-        else:
-            messagebox.showinfo(
-                "Info",
-                "Nessun dato di intervallo (gap/interval) disponibile per questo pilota in questa sessione."
+        marker_styles = {
+            "Avvicinamento": {"color": "tab:green", "marker": "^"},
+            "Allontanamento": {"color": "tab:red", "marker": "v"},
+        }
+        used_labels = set()
+        for seg in pressure_segments:
+            style = marker_styles.get(seg["trend"], {})
+            y_val = seg.get("marker_y")
+            if y_val is None:
+                continue
+            label_key = f"{seg['trend']} ({seg['metric']})"
+            label = None if label_key in used_labels else label_key
+            used_labels.add(label_key)
+            ax_gap.scatter(
+                seg["marker_x"],
+                y_val,
+                color=style.get("color", "black"),
+                marker=style.get("marker", "o"),
+                s=70,
+                zorder=3,
+                label=label,
             )
 
-        # --- Dati stint gomme + laps per analisi gomme & degrado --- #
-        status_var.set(
-            f"Scarico dati stint gomme per sessione {session_key}, pilota {driver_number}..."
+        handles, labels = ax_gap.get_legend_handles_labels()
+        ax_gap.legend(handles, labels)
+
+        global gap_plot_canvas, gap_fig, gap_ax, gap_click_cid, gap_click_data
+        gap_plot_canvas = FigureCanvasTkAgg(fig_gap, master=gap_plot_frame)
+        gap_plot_canvas.get_tk_widget().pack(fill="both", expand=True)
+        gap_plot_canvas.draw()
+
+        gap_fig = fig_gap
+        gap_ax = ax_gap
+        gap_click_data = {
+            "laps": laps_idx,
+            "gap_leader": gaps_leader,
+            "gap_prev": gaps_prev,
+        }
+        gap_click_cid = fig_gap.canvas.mpl_connect("button_press_event", on_gap_plot_click)
+    else:
+        messagebox.showinfo(
+            "Info",
+            "Nessun dato di intervallo (gap/interval) disponibile per questo pilota in questa sessione."
         )
-        root.update_idletasks()
 
+    # --- Dati stint gomme + laps per analisi gomme & degrado --- #
+    status_var.set(
+        f"Scarico dati stint gomme per sessione {session_key}, pilota {driver_number}..."
+    )
+    root.update_idletasks()
+
+    try:
+        stints = fetch_stints(session_key, driver_number)
+    except RuntimeError as e:
+        status_var.set("Errore durante il recupero dei dati degli stint gomme.")
+        messagebox.showerror("Errore", str(e))
+        stints = []
+
+    current_stints_data = stints if isinstance(stints, list) else []
+
+    status_var.set(
+        f"Scarico dati giri per sessione {session_key}, pilota {driver_number}..."
+    )
+    root.update_idletasks()
+
+    try:
+        laps_data = fetch_laps(session_key, driver_number)
+    except RuntimeError as e:
+        status_var.set("Errore durante il recupero dei dati giri.")
+        messagebox.showerror("Errore", str(e))
+        laps_data = []
+
+    current_laps_data = laps_data if isinstance(laps_data, list) else []
+    current_laps_session_key = session_key
+
+    populate_stints_combo()
+    update_stints_summary_table()
+
+    if stints_mode_var is not None:
+        stints_mode_var.set("map")
+    update_stints_map_plot()
+    update_weather_performance_plot(session_key, title_driver)
+
+    # --- Tabella giri --- #
+    if laps_data:
         try:
-            stints = fetch_stints(session_key, driver_number)
-        except RuntimeError as e:
-            status_var.set("Errore durante il recupero dei dati degli stint gomme.")
-            messagebox.showerror("Errore", str(e))
-            stints = []
-
-        current_stints_data = stints if isinstance(stints, list) else []
-
-        status_var.set(
-            f"Scarico dati giri per sessione {session_key}, pilota {driver_number}..."
-        )
-        root.update_idletasks()
-
-        try:
-            laps_data = fetch_laps(session_key, driver_number)
-        except RuntimeError as e:
-            status_var.set("Errore durante il recupero dei dati giri.")
-            messagebox.showerror("Errore", str(e))
-            laps_data = []
-
-        current_laps_data = laps_data if isinstance(laps_data, list) else []
-        current_laps_session_key = session_key
-
-        populate_stints_combo()
-        update_stints_summary_table()
-
-        if stints_mode_var is not None:
-            stints_mode_var.set("map")
-        update_stints_map_plot()
-        update_weather_performance_plot(session_key, title_driver)
-
-        # --- Tabella giri --- #
-        if laps_data:
-            try:
-                laps_sorted = sorted(
-                    laps_data,
-                    key=lambda l: (l.get("lap_number", 9999)
-                                   if isinstance(l.get("lap_number"), int) else 9999)
-                )
-            except Exception:
-                laps_sorted = laps_data
-
-            for lap in laps_sorted:
-                lap_number = lap.get("lap_number", "")
-
-                lap_time_str = format_time_from_seconds(lap.get("lap_duration", None))
-                s1_time_str = format_time_from_seconds(lap.get("duration_sector_1", None))
-                s2_time_str = format_time_from_seconds(lap.get("duration_sector_2", None))
-                s3_time_str = format_time_from_seconds(lap.get("duration_sector_3", None))
-
-                i1_speed = lap.get("i1_speed", "")
-                i2_speed = lap.get("i2_speed", "")
-                st_speed = lap.get("st_speed", "")
-
-                i1_speed_str = str(i1_speed) if isinstance(i1_speed, (int, float)) else ""
-                i2_speed_str = str(i2_speed) if isinstance(i2_speed, (int, float)) else ""
-                st_speed_str = str(st_speed) if isinstance(st_speed, (int, float)) else ""
-
-                is_out = bool(lap.get("is_pit_out_lap", False))
-                out_str = "Sì" if is_out else "No"
-
-                tags = ("outlap",) if is_out else ()
-
-                laps_tree.insert(
-                    "",
-                    tk.END,
-                    values=(
-                        lap_number,
-                        lap_time_str,
-                        s1_time_str,
-                        s2_time_str,
-                        s3_time_str,
-                        i1_speed_str,
-                        i2_speed_str,
-                        st_speed_str,
-                        out_str,
-                    ),
-                    tags=tags
-                )
-        else:
-            messagebox.showinfo(
-                "Info",
-                "Nessun dato giri disponibile per questo pilota in questa sessione."
+            laps_sorted = sorted(
+                laps_data,
+                key=lambda l: (l.get("lap_number", 9999)
+                               if isinstance(l.get("lap_number"), int) else 9999)
             )
+        except Exception:
+            laps_sorted = laps_data
 
-    finally:
-        status_var.set(
-            f"Scarico messaggi Race Control per sessione {session_key}, pilota {driver_number}..."
+        for lap in laps_sorted:
+            lap_number = lap.get("lap_number", "")
+
+            lap_time_str = format_time_from_seconds(lap.get("lap_duration", None))
+            s1_time_str = format_time_from_seconds(lap.get("duration_sector_1", None))
+            s2_time_str = format_time_from_seconds(lap.get("duration_sector_2", None))
+            s3_time_str = format_time_from_seconds(lap.get("duration_sector_3", None))
+
+            i1_speed = lap.get("i1_speed", "")
+            i2_speed = lap.get("i2_speed", "")
+            st_speed = lap.get("st_speed", "")
+
+            i1_speed_str = str(i1_speed) if isinstance(i1_speed, (int, float)) else ""
+            i2_speed_str = str(i2_speed) if isinstance(i2_speed, (int, float)) else ""
+            st_speed_str = str(st_speed) if isinstance(st_speed, (int, float)) else ""
+
+            is_out = bool(lap.get("is_pit_out_lap", False))
+            out_str = "Sì" if is_out else "No"
+
+            tags = ("outlap",) if is_out else ()
+
+            laps_tree.insert(
+                "",
+                tk.END,
+                values=(
+                    lap_number,
+                    lap_time_str,
+                    s1_time_str,
+                    s2_time_str,
+                    s3_time_str,
+                    i1_speed_str,
+                    i2_speed_str,
+                    st_speed_str,
+                    out_str,
+                ),
+                tags=tags
+            )
+    else:
+        messagebox.showinfo(
+            "Info",
+            "Nessun dato giri disponibile per questo pilota in questa sessione."
         )
-        root.update_idletasks()
-        update_race_control_messages(session_key, driver_number, title_driver)
 
     plots_notebook.select(gap_tab_frame)
 
     status_var.set(
-        f"Grafici, analisi gomme, Race Control e tabella giri aggiornati per pilota {driver_number} ({title_driver}). "
-        "La tabella pit stop mostra tutti i pit della sessione; la tab Meteo mostra l'evoluzione meteo."
+        f"Grafici, analisi gomme e tabella giri aggiornati per pilota {driver_number} ({title_driver}). "
+        "La tabella pit stop mostra tutti i pit della sessione; la tab Meteo mostra l'evoluzione meteo. "
+        "Premi 'Recupera messaggi Race Control' per caricare i messaggi relativi al pilota."
+    )
+
+
+def on_fetch_race_control_click():
+    """Handler per il pulsante di recupero dei messaggi Race Control."""
+
+    session_key, session_type, _ = get_selected_session_info()
+    if session_key is None:
+        messagebox.showinfo("Info", "Seleziona prima una sessione.")
+        return
+
+    if not is_race_like(session_type):
+        messagebox.showinfo(
+            "Info",
+            "I messaggi Race Control sono disponibili solo per sessioni Race/Sprint.",
+        )
+        return
+
+    driver_number, driver_name = get_selected_driver_info()
+    if driver_number is None:
+        messagebox.showinfo(
+            "Info",
+            "Seleziona un pilota nella tabella dei risultati prima di recuperare i messaggi Race Control.",
+        )
+        return
+
+    title_driver = driver_name if driver_name else f"Driver {driver_number}"
+
+    status_var.set(
+        f"Scarico messaggi Race Control per sessione {session_key}, pilota {driver_number}..."
+    )
+    root.update_idletasks()
+
+    update_race_control_messages(session_key, driver_number, title_driver)
+    plots_notebook.select(race_control_tab_frame)
+
+    status_var.set(
+        f"Messaggi Race Control aggiornati per {title_driver} (sessione {session_key})."
     )
 
 
@@ -2466,7 +2499,10 @@ gap_pressure_tree.pack(fill="x", padx=5, pady=4)
 
 # --- Contenuto tab Race Control --- #
 race_control_info_var = tk.StringVar(
-    value="Messaggi Race Control: seleziona una sessione Race/Sprint e un pilota per visualizzare i dettagli."
+    value=(
+        "Messaggi Race Control: seleziona una sessione Race/Sprint e un pilota, poi premi "
+        "'Recupera messaggi Race Control' per visualizzare i dettagli."
+    )
 )
 race_control_info_label = ttk.Label(
     race_control_tab_frame,
@@ -2475,6 +2511,16 @@ race_control_info_label = ttk.Label(
     wraplength=1250,
 )
 race_control_info_label.pack(fill="x", padx=5, pady=(5, 2))
+
+race_control_buttons_frame = ttk.Frame(race_control_tab_frame)
+race_control_buttons_frame.pack(fill="x", padx=5, pady=(0, 4))
+
+race_control_fetch_button = ttk.Button(
+    race_control_buttons_frame,
+    text="Recupera messaggi Race Control",
+    command=on_fetch_race_control_click,
+)
+race_control_fetch_button.pack(side="left")
 
 race_control_frame = ttk.Frame(race_control_tab_frame)
 race_control_frame.pack(fill="both", expand=True, padx=5, pady=(0, 5))
