@@ -1,3 +1,4 @@
+import csv
 import os
 import subprocess
 import tempfile
@@ -1035,9 +1036,11 @@ def on_export_race_timeline_click():
         return
 
     try:
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write("Race Timeline\n")
-            f.write("Timestamp\tGiro\tTipo\tDescrizione\tPilota/i\n")
+        with open(filepath, "w", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f, delimiter="\t")
+            writer.writerow(["Race Timeline"])
+            writer.writerow(["Timestamp", "Giro", "Tipo", "Descrizione", "Pilota/i"])
+
             for ev in race_timeline_last_events:
                 ts = ev.get("timestamp")
                 ts_str = (
@@ -1047,9 +1050,11 @@ def on_export_race_timeline_click():
                 )
                 lap_val = ev.get("lap")
                 lap_str = str(lap_val) if isinstance(lap_val, int) else ""
-                f.write(
-                    f"{ts_str}\t{lap_str}\t{ev.get('type', '')}\t{ev.get('description', '')}\t{ev.get('drivers', '')}\n"
-                )
+
+                description = ev.get("description", "") or ""
+                drivers = ev.get("drivers", "") or ""
+                writer.writerow([ts_str, lap_str, ev.get("type", ""), description, drivers])
+
         messagebox.showinfo(
             "Export Timeline",
             f"Timeline esportata in:\n{filepath}",
