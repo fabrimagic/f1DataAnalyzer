@@ -25,6 +25,7 @@ API_PIT_URL = "https://api.openf1.org/v1/pit?session_key={session_key}"
 API_WEATHER_URL = "https://api.openf1.org/v1/weather?session_key={session_key}"
 API_RACE_CONTROL_URL = "https://api.openf1.org/v1/race_control?session_key={session_key}"
 API_TEAM_RADIO_URL = "https://api.openf1.org/v1/team_radio?session_key={session_key}&driver_number={driver_number}"
+API_OVERTAKES_URL = "https://api.openf1.org/v1/overtakes?session_key={session_key}"
 
 # Cache per le informazioni pilota
 DRIVER_CACHE = {}
@@ -49,6 +50,8 @@ team_radio_tree = None
 team_radio_info_var = None
 team_radio_play_thread = None
 team_radio_play_process = None
+race_timeline_tree = None
+race_timeline_detail_var = None
 
 # Impostazioni per identificare scia/aria pulita e momenti chiave
 SLIPSTREAM_THRESHOLD = 1.0
@@ -259,6 +262,12 @@ def fetch_team_radio(session_key: int, driver_number):
 
     url = API_TEAM_RADIO_URL.format(session_key=session_key, driver_number=dn_key)
     return fetch_list_from_api(url, "per i team radio")
+
+
+def fetch_overtakes(session_key: int):
+    """Sorpassi rilevati automaticamente per la sessione."""
+    url = API_OVERTAKES_URL.format(session_key=session_key)
+    return fetch_list_from_api(url, "per i dati sui sorpassi")
 
 
 def set_team_radio_status(message: str):
@@ -726,6 +735,128 @@ def on_fetch_team_radio_click():
 
     update_team_radio_table(session_key, driver_number, driver_name)
 
+
+def clear_race_timeline_table():
+    """Svuota la timeline di gara."""
+    global race_timeline_tree, race_timeline_detail_var
+    if race_timeline_tree is not None:
+        for item in race_timeline_tree.get_children():
+            race_timeline_tree.delete(item)
+    if race_timeline_detail_var is not None:
+        race_timeline_detail_var.set(
+            "Timeline pronta: premi 'Genera Timeline Gara' per creare una sequenza di eventi."
+        )
+
+
+def update_race_timeline_table(events):
+    """Popola la tabella timeline con gli eventi ordinati."""
+    global race_timeline_tree, race_timeline_detail_var
+    if race_timeline_tree is None:
+        return
+
+    for item in race_timeline_tree.get_children():
+        race_timeline_tree.delete(item)
+
+    for ev in events:
+        ts = ev.get("timestamp")
+        ts_str = ts.strftime("%Y-%m-%d %H:%M:%S") if ts else "--"
+        lap_val = ev.get("lap")
+        lap_str = lap_val if isinstance(lap_val, int) else ""
+        race_timeline_tree.insert(
+            "",
+            "end",
+            values=(ts_str, lap_str, ev.get("type", ""), ev.get("description", ""), ev.get("drivers", "")),
+        )
+
+    if race_timeline_detail_var is not None:
+        race_timeline_detail_var.set(
+            f"Timeline generata con {len(events)} eventi." if events else "Nessun evento disponibile per la timeline."
+        )
+
+
+def on_race_timeline_select(event=None):
+    """Mostra dettagli dell'evento selezionato nella timeline."""
+    global race_timeline_tree, race_timeline_detail_var
+    if race_timeline_tree is None or race_timeline_detail_var is None:
+        return
+
+    selection = race_timeline_tree.selection()
+    if not selection:
+        race_timeline_detail_var.set(
+            "Seleziona un evento della timeline per vedere i dettagli."
+        )
+        return
+
+    values = race_timeline_tree.item(selection[0], "values")
+    if not values or len(values) < 5:
+        return
+
+    ts_str, lap_str, ev_type, description, drivers = values
+    details_lines = [f"[{ev_type}] {description}"]
+    if lap_str:
+        details_lines.append(f"Giro: {lap_str}")
+    if ts_str:
+        details_lines.append(f"Timestamp: {ts_str}")
+    if drivers:
+        details_lines.append(f"Coinvolti: {drivers}")
+
+    race_timeline_detail_var.set(" | ".join(details_lines))
+
+
+def on_generate_race_timeline_click():
+    """Handler per costruire la Race Timeline unificata."""
+    global weather_last_data, weather_last_session_key
+
+    session_key, session_type, _ = get_selected_session_info()
+    if session_key is None:
+        messagebox.showinfo("Info", "Seleziona prima una sessione.")
+        return
+
+    if not is_race_like(session_type):
+        messagebox.showinfo(
+            "Info", "La timeline di gara è disponibile solo per sessioni Race o Sprint."
+        )
+        return
+
+    status_var.set("Genero la timeline di gara unificando eventi...")
+    root.update_idletasks()
+
+    laps_data = current_laps_data if current_laps_session_key == session_key else []
+    weather_data = weather_last_data if weather_last_session_key == session_key else []
+
+    try:
+        race_control_messages = fetch_race_control_messages(session_key)
+    except RuntimeError as e:
+        race_control_messages = []
+        messagebox.showerror("Race Control", str(e))
+
+    driver_number, _ = get_selected_driver_info()
+    team_radio_messages = []
+    if driver_number is not None:
+        try:
+            team_radio_messages = fetch_team_radio(session_key, driver_number)
+        except RuntimeError as e:
+            team_radio_messages = []
+            messagebox.showerror("Team Radio", str(e))
+
+    events = compute_race_timeline(
+        session_key,
+        current_results_data,
+        current_pit_data,
+        laps_data,
+        weather_data,
+        race_control_messages,
+        team_radio_messages,
+    )
+
+    update_race_timeline_table(events)
+    plots_notebook.select(race_timeline_tab_frame)
+
+    if events:
+        status_var.set(f"Timeline di gara generata con {len(events)} eventi.")
+    else:
+        status_var.set("Nessun evento disponibile per la timeline.")
+
 def clear_stints_summary_table():
     """Svuota la tabella riassuntiva degli stint."""
     global stints_summary_tree
@@ -860,6 +991,202 @@ def find_pressure_stints(laps, gap_leader_series, interval_series):
     segments.extend(analyze_series(gap_leader_series, "gap_to_leader"))
     segments.extend(analyze_series(interval_series, "interval"))
     return segments
+
+
+def compute_race_timeline(
+    session_key,
+    current_results_data,
+    current_pit_data,
+    current_laps_data,
+    weather_last_data,
+    race_control_messages,
+    team_radio_messages,
+):
+    """Costruisce una timeline unificata degli eventi di gara."""
+
+    events = []
+
+    lap_time_index = {}
+    driver_from_laps = None
+    for lap in current_laps_data or []:
+        lap_num = lap.get("lap_number")
+        lap_dt = parse_iso_datetime(lap.get("date_start", ""))
+        if isinstance(lap_num, int) and lap_dt is not None:
+            lap_time_index[lap_num] = lap_dt
+        if driver_from_laps is None and isinstance(lap.get("driver_number"), (int, float, str)):
+            driver_from_laps = lap.get("driver_number")
+
+    driver_name_cache = {}
+
+    for res in current_results_data or []:
+        dnum = res.get("driver_number")
+        if dnum is None:
+            continue
+        try:
+            d_int = int(dnum)
+        except (ValueError, TypeError):
+            continue
+        driver_name_cache[d_int] = res.get("full_name") or fetch_driver_full_name(d_int, session_key)
+
+    def resolve_driver_label(dnum):
+        if dnum is None:
+            return ""
+        try:
+            d_int = int(dnum)
+        except (ValueError, TypeError):
+            return str(dnum)
+        if d_int in driver_name_cache:
+            return driver_name_cache[d_int]
+        name = fetch_driver_full_name(d_int, session_key)
+        driver_name_cache[d_int] = name
+        return name or f"Driver {d_int}"
+
+    def resolve_timestamp(raw_ts, lap_number=None):
+        parsed = parse_iso_datetime(raw_ts) if raw_ts else None
+        if parsed is None and isinstance(lap_number, int):
+            parsed = lap_time_index.get(lap_number)
+        return parsed
+
+    def add_event(ts, lap, ev_type, description, drivers_text=""):
+        events.append(
+            {
+                "timestamp": ts,
+                "lap": lap if isinstance(lap, int) else None,
+                "type": ev_type,
+                "description": description,
+                "drivers": drivers_text,
+            }
+        )
+
+    # Sorpassi
+    overtakes = []
+    try:
+        overtakes = fetch_overtakes(session_key)
+    except RuntimeError:
+        overtakes = []
+
+    for ot in overtakes:
+        ts = resolve_timestamp(ot.get("date"))
+        overtaking = resolve_driver_label(ot.get("overtaking_driver_number"))
+        overtaken = resolve_driver_label(ot.get("overtaken_driver_number"))
+        position = ot.get("position")
+        pos_txt = f" per P{position}" if isinstance(position, int) else ""
+        add_event(
+            ts,
+            None,
+            "Sorpasso",
+            f"{overtaking} supera {overtaken}{pos_txt}",
+            f"{overtaking} vs {overtaken}",
+        )
+
+    # Pit stop
+    for pit in current_pit_data or []:
+        lap_num = pit.get("lap_number")
+        ts = resolve_timestamp(pit.get("date"), lap_num)
+        driver_label = resolve_driver_label(pit.get("driver_number"))
+        pit_dur = pit.get("pit_duration")
+        dur_txt = f" in {pit_dur:.3f}s" if isinstance(pit_dur, (int, float)) else ""
+        add_event(
+            ts,
+            lap_num,
+            "Pit stop",
+            f"{driver_label} effettua un pit{dur_txt}",
+            driver_label,
+        )
+
+    # Race control (SC/VSC/YELLOW/RED)
+    for msg in race_control_messages or []:
+        flag_text = str(msg.get("flag", "")).lower()
+        category_text = str(msg.get("category", "")).lower()
+        message_text = msg.get("message", "")
+        if not any(
+            term in flag_text or term in category_text
+            for term in ["sc", "safety", "vsc", "yellow", "red"]
+        ):
+            continue
+        lap_num = msg.get("lap_number")
+        ts = resolve_timestamp(msg.get("date"), lap_num)
+        flag_label = msg.get("flag") or msg.get("category") or "Race Control"
+        add_event(ts, lap_num, "Race Control", f"{flag_label}: {message_text}")
+
+    # Meteo: pioggia o variazioni track temp
+    prev_rain = None
+    prev_track_temp = None
+    for w in weather_last_data or []:
+        ts = resolve_timestamp(w.get("date"))
+        rain = w.get("rainfall")
+        track_temp = w.get("track_temperature")
+        if isinstance(rain, (int, float)):
+            if (prev_rain is None or prev_rain <= 0) and rain > 0:
+                add_event(ts, None, "Meteo", f"Pioggia rilevata ({rain} mm/h)")
+            prev_rain = rain
+        if isinstance(track_temp, (int, float)) and isinstance(prev_track_temp, (int, float)):
+            delta = track_temp - prev_track_temp
+            if abs(delta) >= 5:
+                trend = "aumenta" if delta > 0 else "diminuisce"
+                add_event(ts, None, "Meteo", f"Track temp {trend} di {abs(delta):.1f}°C")
+        if isinstance(track_temp, (int, float)):
+            prev_track_temp = track_temp
+
+    # Analisi gap su giri correnti
+    laps_sorted = []
+    try:
+        laps_sorted = sorted(
+            [l for l in current_laps_data or [] if isinstance(l.get("lap_number"), int)],
+            key=lambda l: l.get("lap_number"),
+        )
+    except Exception:
+        laps_sorted = current_laps_data or []
+
+    laps_numbers = [l.get("lap_number") for l in laps_sorted]
+    gap_leader_series = [
+        l.get("gap_to_leader") if isinstance(l.get("gap_to_leader"), (int, float)) else None
+        for l in laps_sorted
+    ]
+    interval_series = [
+        l.get("interval") if isinstance(l.get("interval"), (int, float)) else None
+        for l in laps_sorted
+    ]
+
+    if laps_numbers:
+        pressure_segments = find_pressure_stints(
+            laps_numbers,
+            gap_leader_series,
+            interval_series,
+        )
+        driver_label = resolve_driver_label(driver_from_laps)
+        for seg in pressure_segments:
+            ts = lap_time_index.get(seg.get("start_lap")) or lap_time_index.get(seg.get("end_lap"))
+            trend_txt = "guadagna" if seg.get("trend") == "Avvicinamento" else "perde"
+            metric = seg.get("metric")
+            add_event(
+                ts,
+                seg.get("start_lap"),
+                "Analisi gap",
+                (
+                    f"{driver_label} {trend_txt} rapidamente ({metric}, Δ {seg.get('delta', 0):+.2f}s) "
+                    f"tra i giri {seg.get('start_lap')} e {seg.get('end_lap')}"
+                ),
+                driver_label,
+            )
+
+    # Team radio
+    for tr in team_radio_messages or []:
+        lap_num = tr.get("lap_number")
+        ts = resolve_timestamp(tr.get("date"), lap_num)
+        driver_label = resolve_driver_label(tr.get("driver_number") or driver_from_laps)
+        lap_txt = f" (giro {lap_num})" if isinstance(lap_num, int) else ""
+        add_event(ts, lap_num, "Team Radio", f"Team radio {driver_label}{lap_txt}", driver_label)
+
+    def sort_key(ev):
+        ts = ev.get("timestamp")
+        if ts is None:
+            ts = lap_time_index.get(ev.get("lap"))
+        if ts is None:
+            ts = datetime.max
+        return ts
+
+    return sorted(events, key=sort_key)
 
 
 # --------------------- Meteo sessione --------------------- #
@@ -3382,6 +3709,7 @@ team_radio_tab_frame = ttk.Frame(plots_notebook, padding=6, style="Card.TFrame")
 weather_tab_frame = ttk.Frame(plots_notebook, padding=6, style="Card.TFrame")
 stats_tab_frame = ttk.Frame(plots_notebook, padding=6, style="Card.TFrame")
 pit_strategy_tab_frame = ttk.Frame(plots_notebook, padding=6, style="Card.TFrame")
+race_timeline_tab_frame = ttk.Frame(plots_notebook, padding=6, style="Card.TFrame")
 
 plots_notebook.add(gap_tab_frame, text="Grafico distacchi")
 plots_notebook.add(stints_tab_frame, text="Gomme: mappa & analisi")
@@ -3390,6 +3718,7 @@ plots_notebook.add(team_radio_tab_frame, text="Team Radio")
 plots_notebook.add(weather_tab_frame, text="Meteo sessione")
 plots_notebook.add(stats_tab_frame, text="Statistiche piloti")
 plots_notebook.add(pit_strategy_tab_frame, text="Pit stop & strategia")
+plots_notebook.add(race_timeline_tab_frame, text="Race Timeline")
 
 # --- Contenuto tab Grafico distacchi --- #
 gap_info_frame = ttk.Frame(gap_tab_frame, style="Card.TFrame")
@@ -3564,6 +3893,71 @@ ttk.Button(
     text="Riproduci selezione",
     command=on_play_team_radio_click,
 ).pack(side="left", padx=(0, 6))
+
+# --- Contenuto tab Race Timeline --- #
+race_timeline_info = tk.StringVar(
+    value=(
+        "Genera una sequenza di eventi unificata combinando sorpassi, pit, Race Control, meteo, "
+        "analisi gap e team radio (per il pilota selezionato)."
+    )
+)
+ttk.Label(
+    race_timeline_tab_frame,
+    textvariable=race_timeline_info,
+    anchor="w",
+    wraplength=1250,
+    style="Info.TLabel",
+).pack(fill="x", padx=5, pady=(5, 2))
+
+timeline_buttons_frame = ttk.Frame(race_timeline_tab_frame, style="Card.TFrame")
+timeline_buttons_frame.pack(fill="x", padx=5, pady=(0, 4))
+
+ttk.Button(
+    timeline_buttons_frame,
+    text="Genera Timeline Gara",
+    command=on_generate_race_timeline_click,
+).pack(side="left")
+
+race_timeline_columns = ("timestamp", "lap", "type", "description", "drivers")
+race_timeline_tree = ttk.Treeview(
+    race_timeline_tab_frame,
+    columns=race_timeline_columns,
+    show="headings",
+    height=14,
+)
+
+race_timeline_tree.heading("timestamp", text="Data / Ora")
+race_timeline_tree.heading("lap", text="Giro")
+race_timeline_tree.heading("type", text="Tipo")
+race_timeline_tree.heading("description", text="Descrizione")
+race_timeline_tree.heading("drivers", text="Pilota/i")
+
+race_timeline_tree.column("timestamp", width=170, anchor="center")
+race_timeline_tree.column("lap", width=70, anchor="center")
+race_timeline_tree.column("type", width=110, anchor="center")
+race_timeline_tree.column("description", width=780, anchor="w")
+race_timeline_tree.column("drivers", width=170, anchor="w")
+
+race_timeline_vsb = ttk.Scrollbar(
+    race_timeline_tab_frame, orient="vertical", command=race_timeline_tree.yview
+)
+race_timeline_tree.configure(yscrollcommand=race_timeline_vsb.set)
+
+race_timeline_tree.pack(side="left", fill="both", expand=True, padx=(5, 0), pady=5)
+race_timeline_vsb.pack(side="right", fill="y", padx=(0, 5), pady=5)
+
+race_timeline_tree.bind("<<TreeviewSelect>>", on_race_timeline_select)
+
+race_timeline_detail_var = tk.StringVar(
+    value="Timeline pronta: premi 'Genera Timeline Gara' per creare una sequenza di eventi."
+)
+ttk.Label(
+    race_timeline_tab_frame,
+    textvariable=race_timeline_detail_var,
+    anchor="w",
+    wraplength=1250,
+    style="Info.TLabel",
+).pack(fill="x", padx=5, pady=(0, 5))
 
 # --- Contenuto tab Gomme (stints_tab_frame) --- #
 stints_mode_var = tk.StringVar(value="map")
