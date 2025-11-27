@@ -93,6 +93,7 @@ pit_stats_tree = None
 pit_strategy_canvas = None
 pit_strategy_fig = None
 pit_strategy_plot_frame = None
+pit_undercut_tree = None
 
 
 # --------------------- Funzioni per le API --------------------- #
@@ -731,11 +732,15 @@ def clear_stints_summary_table():
 
 def clear_pit_strategy():
     """Svuota tabella e grafico di 'Pit stop & strategia'."""
-    global pit_stats_tree, pit_strategy_canvas, pit_strategy_fig
+    global pit_stats_tree, pit_strategy_canvas, pit_strategy_fig, pit_undercut_tree
 
     if pit_stats_tree is not None:
         for item in pit_stats_tree.get_children():
             pit_stats_tree.delete(item)
+
+    if pit_undercut_tree is not None:
+        for item in pit_undercut_tree.get_children():
+            pit_undercut_tree.delete(item)
 
     if pit_strategy_canvas is not None:
         pit_strategy_canvas.get_tk_widget().destroy()
@@ -1723,6 +1728,240 @@ def on_show_compound_avg_click():
 
 # --------------------- Analisi pit stop & strategia --------------------- #
 
+def compute_undercut_overcut_events(session_key, session_type, pit_data, results_data):
+    """
+    Identifica eventi di undercut/overcut tra piloti vicini in classifica.
+
+    Ritorna una lista di dict con chiavi:
+        driver_a, driver_b, type ("Undercut"/"Overcut"), pit_a, pit_b, laps, delta
+    """
+    if not is_race_like(session_type):
+        return []
+
+    if not pit_data or not results_data:
+        return []
+
+    # Ordina i risultati per posizione per considerare solo piloti ravvicinati
+    ordered_results = []
+    for r in results_data:
+        pos = r.get("position", None)
+        dnum = r.get("driver_number", None)
+        if isinstance(pos, int) and isinstance(dnum, int):
+            ordered_results.append((pos, dnum))
+    ordered_results.sort(key=lambda x: x[0])
+
+    if not ordered_results:
+        return []
+
+    # Mappa driver -> lista giri pit ordinati
+    pits_by_driver = {}
+    for p in pit_data:
+        dnum = p.get("driver_number", None)
+        lap = p.get("lap_number", None)
+        if not isinstance(dnum, int) or not isinstance(lap, int):
+            continue
+        pits_by_driver.setdefault(dnum, []).append(lap)
+
+    for laps in pits_by_driver.values():
+        laps.sort()
+
+    if not pits_by_driver:
+        return []
+
+    laps_cache = {}
+    name_cache = {}
+
+    def get_driver_name(dnum):
+        if dnum not in name_cache:
+            name_cache[dnum] = fetch_driver_full_name(dnum, session_key)
+        return name_cache.get(dnum, "")
+
+    def get_lap_map(dnum):
+        """Restituisce lap_number -> lap_duration per giri validi (no out-lap)."""
+        if dnum in laps_cache:
+            return laps_cache[dnum]
+
+        try:
+            laps_data = fetch_laps(session_key, dnum)
+        except RuntimeError:
+            laps_data = []
+
+        lap_map = {}
+        if isinstance(laps_data, list):
+            for lap in laps_data:
+                ln = lap.get("lap_number", None)
+                ld = lap.get("lap_duration", None)
+                if not isinstance(ln, int) or not isinstance(ld, (int, float)):
+                    continue
+                if lap.get("is_pit_out_lap", False):
+                    continue
+                lap_map[ln] = float(ld)
+
+        laps_cache[dnum] = lap_map
+        return lap_map
+
+    events = []
+    MAX_POSITION_GAP = 3
+    MIN_GAIN_SECONDS = 0.7
+
+    def analyze_pair(first_driver, second_driver):
+        """
+        first_driver: pilota che pitta per primo
+        second_driver: pilota che rimane fuori almeno un giro in più
+        """
+        results = []
+        first_pits = pits_by_driver.get(first_driver, [])
+        second_pits = pits_by_driver.get(second_driver, [])
+        if not first_pits or not second_pits:
+            return results
+
+        for pit_first in first_pits:
+            later_pits = [lp for lp in second_pits if lp > pit_first]
+            if not later_pits:
+                continue
+            pit_second = min(later_pits)
+
+            laps_first = get_lap_map(first_driver)
+            laps_second = get_lap_map(second_driver)
+            if not laps_first or not laps_second:
+                continue
+
+            comparison = []
+            for lap_idx in range(pit_first + 1, pit_second):
+                t_first = laps_first.get(lap_idx, None)
+                t_second = laps_second.get(lap_idx, None)
+                if not isinstance(t_first, (int, float)) or not isinstance(t_second, (int, float)):
+                    continue
+                comparison.append((lap_idx, t_second - t_first))
+
+            if not comparison:
+                continue
+
+            total_gain = sum(delta for _, delta in comparison)
+            if abs(total_gain) < MIN_GAIN_SECONDS:
+                continue
+
+            laps_range = (
+                f"{comparison[0][0]}-{comparison[-1][0]}"
+                if len(comparison) > 1
+                else str(comparison[0][0])
+            )
+
+            if total_gain >= MIN_GAIN_SECONDS:
+                results.append(
+                    {
+                        "driver_a": get_driver_name(first_driver),
+                        "driver_b": get_driver_name(second_driver),
+                        "type": "Undercut",
+                        "pit_a": pit_first,
+                        "pit_b": pit_second,
+                        "laps": laps_range,
+                        "delta": total_gain,
+                    }
+                )
+            elif total_gain <= -MIN_GAIN_SECONDS:
+                results.append(
+                    {
+                        "driver_a": get_driver_name(second_driver),
+                        "driver_b": get_driver_name(first_driver),
+                        "type": "Overcut",
+                        "pit_a": pit_second,
+                        "pit_b": pit_first,
+                        "laps": laps_range,
+                        "delta": abs(total_gain),
+                    }
+                )
+            # Considera solo il primo pit utile della coppia per evitare duplicati
+            if results:
+                break
+
+        return results
+
+    for idx, (pos_a, d_a) in enumerate(ordered_results):
+        for pos_b, d_b in ordered_results[idx + 1 :]:
+            if pos_b - pos_a > MAX_POSITION_GAP:
+                break
+            # Primo scenario: d_a pitta prima di d_b
+            events.extend(analyze_pair(d_a, d_b))
+            # Secondo scenario: d_b pitta prima di d_a
+            events.extend(analyze_pair(d_b, d_a))
+
+    return events
+
+
+def update_pit_undercut_table(events):
+    """Aggiorna la tabella degli undercut/overcut nella sezione pit."""
+    global pit_undercut_tree
+
+    if pit_undercut_tree is None:
+        return
+
+    for item in pit_undercut_tree.get_children():
+        pit_undercut_tree.delete(item)
+
+    for ev in events:
+        pit_undercut_tree.insert(
+            "",
+            tk.END,
+            values=(
+                ev.get("driver_a", ""),
+                ev.get("driver_b", ""),
+                ev.get("type", ""),
+                ev.get("pit_a", ""),
+                ev.get("pit_b", ""),
+                ev.get("laps", ""),
+                f"{ev.get('delta', 0):.3f}",
+            ),
+        )
+
+
+def on_compute_undercut_analysis_click():
+    """Callback per il bottone di analisi undercut/overcut."""
+    session_key, session_type, _ = get_selected_session_info()
+    if session_key is None:
+        messagebox.showinfo("Info", "Seleziona prima una sessione.")
+        return
+
+    if not is_race_like(session_type):
+        messagebox.showinfo(
+            "Info",
+            "L'analisi undercut/overcut è disponibile solo per sessioni Race o Sprint.",
+        )
+        return
+
+    if not current_pit_data:
+        messagebox.showinfo("Info", "Nessun pit stop disponibile per questa sessione.")
+        return
+
+    if not current_results_data:
+        messagebox.showinfo(
+            "Info", "Prima carica i risultati della sessione con il relativo bottone."
+        )
+        return
+
+    status_var.set("Calcolo analisi undercut/overcut in corso...")
+    root.update_idletasks()
+
+    try:
+        events = compute_undercut_overcut_events(
+            session_key, session_type, current_pit_data, current_results_data
+        )
+    except Exception as e:
+        status_var.set("Errore durante l'analisi undercut/overcut.")
+        messagebox.showerror("Analisi undercut/overcut", str(e))
+        return
+
+    update_pit_undercut_table(events)
+    plots_notebook.select(pit_strategy_tab_frame)
+
+    if events:
+        status_var.set(
+            f"Trovati {len(events)} scenari di undercut/overcut. Seleziona la tab 'Pit stop & strategia'."
+        )
+    else:
+        status_var.set("Nessun undercut/overcut rilevato con i dati disponibili.")
+
+
 def on_compute_pit_strategy_click():
     """
     Analizza i pit stop della sessione (Race/Sprint):
@@ -2521,21 +2760,28 @@ pit_strategy_button = ttk.Button(
 )
 pit_strategy_button.grid(row=0, column=3, padx=4, pady=2, sticky="ew")
 
+pit_undercut_button = ttk.Button(
+    actions_frame,
+    text="Analisi undercut/overcut",
+    command=on_compute_undercut_analysis_click,
+)
+pit_undercut_button.grid(row=0, column=4, padx=4, pady=2, sticky="ew")
+
 race_control_action = ttk.Button(
     actions_frame,
     text="Race Control pilota",
     command=on_fetch_race_control_click,
 )
-race_control_action.grid(row=0, column=4, padx=4, pady=2, sticky="ew")
+race_control_action.grid(row=0, column=5, padx=4, pady=2, sticky="ew")
 
 team_radio_button = ttk.Button(
     actions_frame,
     text="Team radio pilota",
     command=on_fetch_team_radio_click,
 )
-team_radio_button.grid(row=0, column=5, padx=4, pady=2, sticky="ew")
+team_radio_button.grid(row=0, column=6, padx=4, pady=2, sticky="ew")
 
-actions_frame.columnconfigure((0, 1, 2, 3, 4, 5), weight=1)
+actions_frame.columnconfigure((0, 1, 2, 3, 4, 5, 6), weight=1)
 
 # --- Layout principale con paned window per mostrare tutte le sezioni --- #
 main_paned = ttk.Panedwindow(root, orient=tk.VERTICAL)
@@ -3283,6 +3529,62 @@ pit_stats_vsb.grid(row=0, column=1, sticky="ns")
 
 pit_stats_frame.rowconfigure(0, weight=1)
 pit_stats_frame.columnconfigure(0, weight=1)
+
+undercut_label = ttk.Label(
+    pit_strategy_tab_frame,
+    text="Undercut/overcut tra piloti ravvicinati:",
+    font=("", 9, "bold"),
+)
+undercut_label.pack(anchor="w", padx=5, pady=(4, 0))
+
+pit_undercut_frame = ttk.Frame(pit_strategy_tab_frame)
+pit_undercut_frame.pack(fill="x", expand=False, padx=5, pady=(0, 4))
+
+pit_undercut_columns = (
+    "driver_a",
+    "driver_b",
+    "event_type",
+    "pit_a",
+    "pit_b",
+    "laps",
+    "delta",
+)
+
+pit_undercut_tree = ttk.Treeview(
+    pit_undercut_frame,
+    columns=pit_undercut_columns,
+    show="headings",
+    height=5,
+)
+
+pit_undercut_tree.heading("driver_a", text="Driver A")
+pit_undercut_tree.heading("driver_b", text="Driver B")
+pit_undercut_tree.heading("event_type", text="Tipo")
+pit_undercut_tree.heading("pit_a", text="Giro pit A")
+pit_undercut_tree.heading("pit_b", text="Giro pit B")
+pit_undercut_tree.heading("laps", text="Giri analizzati")
+pit_undercut_tree.heading("delta", text="Delta guadagnato (s)")
+
+pit_undercut_tree.column("driver_a", width=160, anchor="w")
+pit_undercut_tree.column("driver_b", width=160, anchor="w")
+pit_undercut_tree.column("event_type", width=90, anchor="center")
+pit_undercut_tree.column("pit_a", width=80, anchor="center")
+pit_undercut_tree.column("pit_b", width=80, anchor="center")
+pit_undercut_tree.column("laps", width=130, anchor="center")
+pit_undercut_tree.column("delta", width=140, anchor="center")
+
+pit_undercut_vsb = ttk.Scrollbar(
+    pit_undercut_frame,
+    orient="vertical",
+    command=pit_undercut_tree.yview,
+)
+pit_undercut_tree.configure(yscrollcommand=pit_undercut_vsb.set)
+
+pit_undercut_tree.grid(row=0, column=0, sticky="nsew")
+pit_undercut_vsb.grid(row=0, column=1, sticky="ns")
+
+pit_undercut_frame.rowconfigure(0, weight=1)
+pit_undercut_frame.columnconfigure(0, weight=1)
 
 ttk.Label(
     pit_strategy_tab_frame,
