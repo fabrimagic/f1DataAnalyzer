@@ -4,6 +4,7 @@ import urllib.request
 import urllib.error
 import json
 import math
+from datetime import datetime
 
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -46,6 +47,13 @@ weather_canvas = None
 weather_fig = None
 weather_plot_frame = None
 weather_info_var = None
+weather_stats_vars = {}
+weather_perf_canvas = None
+weather_perf_fig = None
+weather_perf_info_var = None
+weather_perf_plot_frame = None
+weather_last_data = []
+weather_last_session_key = None
 
 # Statistiche piloti (lap time)
 stats_tree = None
@@ -53,6 +61,7 @@ stats_tree = None
 # Dati correnti per stint/laps del pilota selezionato
 current_stints_data = []
 current_laps_data = []
+current_laps_session_key = None
 
 # Riferimenti GUI per sezione gomme
 stints_mode_var = None
@@ -210,6 +219,33 @@ def format_time_from_seconds(seconds_value):
     return f"{minutes:02d}:{seconds:02d}.{millis:03d}"
 
 
+def parse_iso_datetime(value: str):
+    """Parsing sicuro per stringhe ISO8601 restituite dall'API (gestisce suffisso Z)."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        cleaned = value.replace("Z", "+00:00")
+        return datetime.fromisoformat(cleaned)
+    except Exception:
+        return None
+
+
+def compute_numeric_stats(values):
+    """Ritorna (media, min, max) ignorando valori non numerici."""
+    nums = [v for v in values if isinstance(v, (int, float))]
+    if not nums:
+        return None, None, None
+    mean_val = sum(nums) / len(nums)
+    return mean_val, min(nums), max(nums)
+
+
+def compute_mean(values):
+    nums = [v for v in values if isinstance(v, (int, float))]
+    if not nums:
+        return None
+    return sum(nums) / len(nums)
+
+
 def is_race_like(session_type: str) -> bool:
     """Considera 'gara' sia Race che Sprint."""
     st = (session_type or "").strip().lower()
@@ -260,7 +296,7 @@ def clear_driver_plots():
     """Rimuove i grafici distacchi e stint gomme e resetta handler click."""
     global gap_plot_canvas, stints_plot_canvas
     global gap_fig, gap_ax, gap_click_cid, gap_click_data, gap_point_info_var
-    global current_stints_data, current_laps_data, current_stints_for_combo
+    global current_stints_data, current_laps_data, current_laps_session_key, current_stints_for_combo
 
     # Disconnette eventuale handler click dal grafico distacchi
     if gap_fig is not None and gap_click_cid is not None:
@@ -292,6 +328,7 @@ def clear_driver_plots():
     # Reset dati stint/laps del pilota
     current_stints_data = []
     current_laps_data = []
+    current_laps_session_key = None
     current_stints_for_combo = []
     if stints_combo is not None:
         stints_combo["values"] = ()
@@ -302,7 +339,7 @@ def clear_driver_plots():
 
 def clear_weather_plot():
     """Rimuove il grafico meteo, se presente."""
-    global weather_canvas, weather_fig, weather_info_var
+    global weather_canvas, weather_fig, weather_info_var, weather_last_data, weather_last_session_key
     if weather_canvas is not None:
         weather_canvas.get_tk_widget().destroy()
         weather_canvas = None
@@ -311,6 +348,12 @@ def clear_weather_plot():
         weather_info_var.set(
             "Meteo sessione: in attesa di una sessione selezionata."
         )
+
+    weather_last_data = []
+    weather_last_session_key = None
+
+    update_weather_stats_box()
+    clear_weather_performance_plot()
 
 
 def clear_stats_table():
@@ -479,12 +522,63 @@ def find_pressure_stints(laps, gap_leader_series, interval_series):
 
 # --------------------- Meteo sessione --------------------- #
 
+def update_weather_stats_box(track_stats=None, air_stats=None, humidity_mean=None, wind_mean=None):
+    """Aggiorna il box riepilogo meteo con i valori calcolati."""
+    global weather_stats_vars
+    for key in ("track", "air", "humidity", "wind"):
+        if key not in weather_stats_vars:
+            weather_stats_vars[key] = tk.StringVar()
+    default_line = "--"
+    track_mean, track_min, track_max = track_stats if track_stats else (None, None, None)
+    air_mean, air_min, air_max = air_stats if air_stats else (None, None, None)
+
+    def fmt_triplet(mean_v, min_v, max_v, unit=""):
+        if not isinstance(mean_v, (int, float)):
+            return default_line
+        min_str = f"{min_v:.1f}" if isinstance(min_v, (int, float)) else "--"
+        max_str = f"{max_v:.1f}" if isinstance(max_v, (int, float)) else "--"
+        unit_suffix = f" {unit}" if unit else ""
+        return f"Media: {mean_v:.1f}{unit_suffix} | Min: {min_str}{unit_suffix} | Max: {max_str}{unit_suffix}"
+
+    weather_stats_vars.get("track", tk.StringVar()).set(
+        f"Track temp {fmt_triplet(track_mean, track_min, track_max, '°C')}"
+    )
+    weather_stats_vars.get("air", tk.StringVar()).set(
+        f"Air temp {fmt_triplet(air_mean, air_min, air_max, '°C')}"
+    )
+
+    if isinstance(humidity_mean, (int, float)):
+        hum_line = f"Umidità media: {humidity_mean:.1f}%"
+    else:
+        hum_line = "Umidità media: --"
+    weather_stats_vars.get("humidity", tk.StringVar()).set(hum_line)
+
+    if isinstance(wind_mean, (int, float)):
+        wind_line = f"Wind speed media: {wind_mean:.1f} m/s"
+    else:
+        wind_line = "Wind speed media: --"
+    weather_stats_vars.get("wind", tk.StringVar()).set(wind_line)
+
+
+def clear_weather_performance_plot():
+    """Ripulisce il grafico di correlazione meteo-prestazioni."""
+    global weather_perf_canvas, weather_perf_fig, weather_perf_info_var
+    if weather_perf_canvas is not None:
+        weather_perf_canvas.get_tk_widget().destroy()
+        weather_perf_canvas = None
+    weather_perf_fig = None
+    if weather_perf_info_var is not None:
+        weather_perf_info_var.set(
+            "Carica una sessione e seleziona un pilota per vedere la correlazione track temp vs lap time."
+        )
+
 def update_weather_for_session(session_key: int):
     """
     Scarica e visualizza il meteo per la sessione selezionata,
     usando esclusivamente la session_key.
     """
     global weather_canvas, weather_fig, weather_plot_frame, weather_info_var
+    global weather_last_data, weather_last_session_key
 
     clear_weather_plot()
 
@@ -517,6 +611,9 @@ def update_weather_for_session(session_key: int):
     except Exception:
         weather_sorted = weather_data
 
+    weather_last_data = weather_sorted
+    weather_last_session_key = session_key
+
     x_idx = []
     track_temps = []
     air_temps = []
@@ -546,13 +643,31 @@ def update_weather_for_session(session_key: int):
         status_var.set("Nessun dato meteo valido da visualizzare per questa sessione.")
         return
 
-    # Calcola presenza pioggia
+    # Calcola presenza pioggia e primo campione
     rain_present = any((isinstance(r, (int, float)) and r > 0) for r in rainfall_vals)
-    if weather_info_var is not None:
-        weather_info_var.set(
-            f"Pioggia rilevata: {'Sì' if rain_present else 'No'} "
-            "(in base ai campioni meteo della sessione)."
+    first_rain_info = None
+    for idx, w in enumerate(weather_sorted, start=1):
+        rf_val = w.get("rainfall", None)
+        if isinstance(rf_val, (int, float)) and rf_val > 0:
+            first_rain_info = (idx, w.get("date", ""))
+            break
+
+    lines_info = [
+        f"Pioggia rilevata: {'Sì' if rain_present else 'No'} (in base ai campioni meteo della sessione)."
+    ]
+    if first_rain_info is not None:
+        lines_info.append(
+            f"Primi campioni con pioggia: indice {first_rain_info[0]} / data {first_rain_info[1]}"
         )
+    if weather_info_var is not None:
+        weather_info_var.set("\n".join(lines_info))
+
+    # Aggiorna box statistiche sintetiche
+    track_stats = compute_numeric_stats(track_temps)
+    air_stats = compute_numeric_stats(air_temps)
+    humidity_mean = compute_mean(hums)
+    wind_mean = compute_mean(wind_speeds)
+    update_weather_stats_box(track_stats, air_stats, humidity_mean, wind_mean)
 
     weather_fig_local = Figure(figsize=(6, 3.2))
     ax1 = weather_fig_local.add_subplot(211)
@@ -582,6 +697,134 @@ def update_weather_for_session(session_key: int):
     status_var.set(
         f"Dati meteo caricati per la sessione {session_key}."
     )
+
+    update_weather_performance_plot(session_key)
+
+
+def update_weather_performance_plot(session_key: int, driver_label: str = None):
+    """Mostra la correlazione track temp vs lap time per il pilota attivo."""
+    global weather_perf_canvas, weather_perf_fig
+
+    clear_weather_performance_plot()
+
+    if session_key is None:
+        return
+
+    if not weather_last_data or weather_last_session_key != session_key:
+        if weather_perf_info_var is not None:
+            weather_perf_info_var.set(
+                "Seleziona una sessione e scarica il meteo per abilitare la correlazione."
+            )
+        return
+
+    if not current_laps_data or current_laps_session_key != session_key:
+        if weather_perf_info_var is not None:
+            weather_perf_info_var.set(
+                "Seleziona un pilota e carica i suoi giri per vedere la correlazione con la track temp."
+            )
+        return
+
+    weather_points = []
+    for w in weather_last_data:
+        dt = parse_iso_datetime(w.get("date", ""))
+        track_temp = w.get("track_temperature", None)
+        if dt is None or not isinstance(track_temp, (int, float)):
+            continue
+        weather_points.append((dt, float(track_temp)))
+
+    if not weather_points:
+        if weather_perf_info_var is not None:
+            weather_perf_info_var.set(
+                "Impossibile calcolare la correlazione: nessun campione meteo con data/track temp valido."
+            )
+        return
+
+    lap_points = []
+    for lap in current_laps_data:
+        if lap.get("is_pit_out_lap", False):
+            continue
+        lap_time = lap.get("lap_duration", None)
+        lap_dt = parse_iso_datetime(lap.get("date_start", ""))
+        if not isinstance(lap_time, (int, float)) or lap_dt is None:
+            continue
+        lap_points.append((float(lap_time), lap_dt, lap.get("lap_number", "")))
+
+    if not lap_points:
+        if weather_perf_info_var is not None:
+            weather_perf_info_var.set(
+                "Nessun giro valido (no out-lap, con lap_duration e timestamp) per la correlazione."
+            )
+        return
+
+    matched = []
+    for lap_time, lap_dt, lap_number in lap_points:
+        nearest = min(
+            weather_points,
+            key=lambda wp: abs((lap_dt - wp[0]).total_seconds()),
+        )
+        matched.append(
+            {
+                "track_temp": nearest[1],
+                "lap_time": lap_time,
+                "lap_number": lap_number,
+            }
+        )
+
+    if not matched:
+        if weather_perf_info_var is not None:
+            weather_perf_info_var.set(
+                "Impossibile calcolare la correlazione: accoppiamento lap/meteo non riuscito."
+            )
+        return
+
+    x_vals = [m["track_temp"] for m in matched]
+    y_vals = [m["lap_time"] for m in matched]
+
+    # Calcolo correlazione Pearson e retta di regressione semplice
+    corr = None
+    slope = None
+    intercept = None
+    if len(x_vals) >= 2:
+        mean_x = sum(x_vals) / len(x_vals)
+        mean_y = sum(y_vals) / len(y_vals)
+        num = sum((x - mean_x) * (y - mean_y) for x, y in zip(x_vals, y_vals))
+        den_x = sum((x - mean_x) ** 2 for x in x_vals)
+        den_y = sum((y - mean_y) ** 2 for y in y_vals)
+        if den_x > 0 and den_y > 0:
+            corr = num / math.sqrt(den_x * den_y)
+        if den_x > 0:
+            slope = num / den_x
+            intercept = mean_y - slope * mean_x
+
+    fig_local = Figure(figsize=(6, 3.2))
+    ax = fig_local.add_subplot(111)
+    scatter = ax.scatter(x_vals, y_vals, c="tab:blue", alpha=0.8)
+
+    if slope is not None and intercept is not None:
+        xs_line = [min(x_vals), max(x_vals)]
+        ys_line = [slope * x + intercept for x in xs_line]
+        ax.plot(xs_line, ys_line, color="tab:orange", linestyle="--", label="Trend line")
+
+    driver_title = f" - {driver_label}" if driver_label else ""
+    ax.set_title(f"Track temp vs lap time{driver_title}")
+    ax.set_xlabel("Track temperature (°C)")
+    ax.set_ylabel("Lap time (s)")
+    ax.grid(True)
+    if slope is not None:
+        ax.legend()
+
+    weather_perf_fig = fig_local
+    weather_perf_canvas = FigureCanvasTkAgg(fig_local, master=weather_perf_plot_frame)
+    weather_perf_canvas.get_tk_widget().pack(fill="both", expand=True)
+    weather_perf_canvas.draw()
+
+    info_lines = [
+        f"Giri abbinati: {len(matched)} (out-lap escluse, accoppiamento per timestamp più vicino)."
+    ]
+    if corr is not None:
+        info_lines.append(f"Correlazione (Pearson): {corr:.2f}")
+    if weather_perf_info_var is not None:
+        weather_perf_info_var.set(" ".join(info_lines))
 
 
 # --------------------- Statistiche piloti (lap time & consistenza) --------------------- #
@@ -1532,7 +1775,7 @@ def on_show_driver_plots_click():
     """
     global gap_plot_canvas, stints_plot_canvas
     global gap_fig, gap_ax, gap_click_cid, gap_click_data
-    global current_stints_data, current_laps_data
+    global current_stints_data, current_laps_data, current_laps_session_key
     global stints_mode_var
 
     session_key, session_type, meeting_key = get_selected_session_info()
@@ -1675,6 +1918,7 @@ def on_show_driver_plots_click():
         laps_data = []
 
     current_laps_data = laps_data if isinstance(laps_data, list) else []
+    current_laps_session_key = session_key
 
     populate_stints_combo()
     update_stints_summary_table()
@@ -1682,6 +1926,7 @@ def on_show_driver_plots_click():
     if stints_mode_var is not None:
         stints_mode_var.set("map")
     update_stints_map_plot()
+    update_weather_performance_plot(session_key, title_driver)
 
     # --- Tabella giri --- #
     if laps_data:
@@ -2223,10 +2468,54 @@ weather_info_var = tk.StringVar(
     value="Meteo sessione: in attesa di una sessione selezionata."
 )
 weather_info_label = ttk.Label(weather_tab_frame, textvariable=weather_info_var, anchor="w")
-weather_info_label.pack(fill="x", pady=(4, 2))
+weather_info_label.pack(fill="x", pady=(4, 2), padx=5)
 
 weather_plot_frame = ttk.Frame(weather_tab_frame)
-weather_plot_frame.pack(fill="both", expand=True)
+weather_plot_frame.pack(fill="both", expand=True, padx=5)
+
+weather_summary_frame = ttk.LabelFrame(weather_tab_frame, text="Riepilogo meteo sessione")
+weather_summary_frame.pack(fill="x", padx=5, pady=(4, 2))
+
+weather_stats_vars = {
+    "track": tk.StringVar(value="Track temp --"),
+    "air": tk.StringVar(value="Air temp --"),
+    "humidity": tk.StringVar(value="Umidità media: --"),
+    "wind": tk.StringVar(value="Wind speed media: --"),
+}
+
+ttk.Label(weather_summary_frame, textvariable=weather_stats_vars["track"], anchor="w").grid(
+    row=0, column=0, sticky="w", padx=5, pady=2
+)
+ttk.Label(weather_summary_frame, textvariable=weather_stats_vars["air"], anchor="w").grid(
+    row=0, column=1, sticky="w", padx=5, pady=2
+)
+ttk.Label(weather_summary_frame, textvariable=weather_stats_vars["humidity"], anchor="w").grid(
+    row=1, column=0, sticky="w", padx=5, pady=2
+)
+ttk.Label(weather_summary_frame, textvariable=weather_stats_vars["wind"], anchor="w").grid(
+    row=1, column=1, sticky="w", padx=5, pady=2
+)
+weather_summary_frame.columnconfigure(0, weight=1)
+weather_summary_frame.columnconfigure(1, weight=1)
+
+weather_perf_section = ttk.LabelFrame(
+    weather_tab_frame,
+    text="Meteo & prestazioni: correlazione track temp vs lap time",
+)
+weather_perf_section.pack(fill="both", expand=True, padx=5, pady=(4, 5))
+
+weather_perf_info_var = tk.StringVar(
+    value="Carica una sessione e seleziona un pilota per vedere la correlazione track temp vs lap time."
+)
+ttk.Label(
+    weather_perf_section,
+    textvariable=weather_perf_info_var,
+    anchor="w",
+    wraplength=1200,
+).pack(fill="x", padx=5, pady=(4, 2))
+
+weather_perf_plot_frame = ttk.Frame(weather_perf_section)
+weather_perf_plot_frame.pack(fill="both", expand=True, padx=5, pady=(0, 5))
 
 # --- Contenuto tab Statistiche piloti --- #
 stats_frame_inner = ttk.Frame(stats_tab_frame)
