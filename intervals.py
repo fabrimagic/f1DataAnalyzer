@@ -35,6 +35,7 @@ DRIVER_PROFILE_CACHE = {}
 gap_plot_canvas = None
 stints_plot_canvas = None
 gap_plot_frame = None
+battle_pressure_tab_frame = None
 
 # Dati e handler per il click sul grafico distacchi
 gap_fig = None
@@ -44,6 +45,12 @@ gap_click_data = {"laps": [], "gap_leader": [], "gap_prev": []}
 gap_point_info_var = None  # inizializzato dopo la creazione della GUI
 gap_slipstream_var = None
 gap_pressure_tree = None
+battle_pressure_tree = None
+battle_pressure_canvas = None
+battle_pressure_fig = None
+battle_pressure_plot_frame = None
+battle_pressure_info_var = None
+battle_pressure_cache = {}
 race_control_tree = None
 race_control_info_var = None
 team_radio_tree = None
@@ -552,6 +559,31 @@ def reset_gap_insights():
             gap_pressure_tree.delete(item)
 
 
+def clear_battle_pressure_table():
+    """Svuota tabella e grafico del Battle / Pressure Index."""
+    global battle_pressure_tree, battle_pressure_canvas, battle_pressure_fig
+    global battle_pressure_info_var, battle_pressure_cache
+
+    battle_pressure_cache = {}
+
+    if battle_pressure_tree is not None:
+        for item in battle_pressure_tree.get_children():
+            battle_pressure_tree.delete(item)
+
+    if battle_pressure_canvas is not None:
+        try:
+            battle_pressure_canvas.get_tk_widget().destroy()
+        except Exception:
+            pass
+        battle_pressure_canvas = None
+    battle_pressure_fig = None
+
+    if battle_pressure_info_var is not None:
+        battle_pressure_info_var.set(
+            "Calcola il Battle/Pressure Index per vedere un riepilogo dei duelli dei piloti."
+        )
+
+
 def update_pressure_table(segments):
     """Popola la tabella con i tratti di avvicinamento/allontanamento."""
     global gap_pressure_tree
@@ -574,6 +606,190 @@ def update_pressure_table(segments):
                 delta_str,
             ),
         )
+
+
+def update_battle_pressure_plot(driver_number):
+    """Aggiorna il mini grafico del Battle/Pressure Index per il pilota selezionato."""
+    global battle_pressure_canvas, battle_pressure_fig, battle_pressure_plot_frame
+    global battle_pressure_cache, battle_pressure_info_var
+
+    if battle_pressure_plot_frame is None:
+        return
+
+    if battle_pressure_canvas is not None:
+        try:
+            battle_pressure_canvas.get_tk_widget().destroy()
+        except Exception:
+            pass
+        battle_pressure_canvas = None
+    battle_pressure_fig = None
+
+    try:
+        dnum_int = int(driver_number)
+    except (ValueError, TypeError):
+        dnum_int = None
+
+    if dnum_int is None or dnum_int not in battle_pressure_cache:
+        if battle_pressure_info_var is not None:
+            battle_pressure_info_var.set(
+                "Seleziona un pilota dalla tabella per vedere il dettaglio dei giri in attacco/difesa."
+            )
+        return
+
+    detail = battle_pressure_cache.get(dnum_int, {})
+    laps = detail.get("laps", [])
+    intervals = detail.get("intervals", [])
+
+    if not laps or not any(isinstance(v, (int, float)) for v in intervals):
+        if battle_pressure_info_var is not None:
+            battle_pressure_info_var.set("Nessun dato interval valido per questo pilota.")
+        return
+
+    attack_laps = set(detail.get("attack_laps", []))
+    clean_laps = set(detail.get("clean_laps", []))
+    segments = detail.get("pressure_segments", [])
+
+    fig = Figure(figsize=(6, 2.6))
+    ax = fig.add_subplot(111)
+
+    plot_x = []
+    plot_y = []
+    colors = []
+    labels_used = set()
+
+    for lap, val in zip(laps, intervals):
+        if not isinstance(val, (int, float)):
+            continue
+        plot_x.append(lap)
+        plot_y.append(val)
+        if lap in attack_laps:
+            colors.append("tab:red")
+        elif lap in clean_laps:
+            colors.append("tab:blue")
+        else:
+            colors.append("#9ca3af")
+
+    ax.scatter(plot_x, plot_y, c=colors, s=26, label="Interval")
+
+    marker_styles = {
+        "Avvicinamento": {"color": "tab:green", "marker": "^"},
+        "Allontanamento": {"color": "tab:orange", "marker": "v"},
+    }
+
+    for seg in segments:
+        trend = seg.get("trend")
+        style = marker_styles.get(trend, {})
+        marker_x = seg.get("marker_x")
+        marker_y = seg.get("marker_y")
+        if marker_x is None or marker_y is None:
+            continue
+        label_key = f"{trend} ({seg.get('metric')})"
+        label = None if label_key in labels_used else label_key
+        labels_used.add(label_key)
+        ax.scatter(
+            marker_x,
+            marker_y,
+            color=style.get("color", "black"),
+            marker=style.get("marker", "o"),
+            s=70,
+            zorder=3,
+            label=label,
+        )
+
+    ax.set_xlabel("Giro")
+    ax.set_ylabel("Interval (s)")
+    ax.set_title("Giri in attacco (rosso) vs aria pulita (blu)")
+    ax.grid(True, linestyle="--", linewidth=0.5)
+
+    handles, labels = ax.get_legend_handles_labels()
+    if handles:
+        ax.legend(handles, labels, fontsize=8, loc="upper right")
+
+    battle_pressure_canvas = FigureCanvasTkAgg(fig, master=battle_pressure_plot_frame)
+    battle_pressure_canvas.get_tk_widget().pack(fill="both", expand=True)
+    battle_pressure_canvas.draw()
+
+    battle_pressure_fig = fig
+
+    if battle_pressure_info_var is not None:
+        battle_pressure_info_var.set(
+            "Rosso = giri <1s dal pilota davanti, Blu = aria pulita, marker = tratti di pressione."
+        )
+
+
+def update_battle_pressure_table(results):
+    """Popola la tabella Battle/Pressure Index con i valori per pilota."""
+    global battle_pressure_tree, battle_pressure_cache
+
+    if battle_pressure_tree is None:
+        return
+
+    for item in battle_pressure_tree.get_children():
+        battle_pressure_tree.delete(item)
+
+    battle_pressure_cache = {}
+
+    try:
+        sorted_results = sorted(results, key=lambda r: r.get("attack_pct", 0), reverse=True)
+    except Exception:
+        sorted_results = results
+
+    for res in sorted_results:
+        driver_number = res.get("driver_number")
+        driver_name = res.get("driver_name") or f"Driver {driver_number}"
+        team_name = res.get("team_name", "")
+
+        laps_total = res.get("laps_total", 0) or 0
+        attack_pct = res.get("attack_pct", 0.0)
+        clean_pct = res.get("clean_pct", 0.0)
+        pressure_stints = res.get("pressure_stints", 0)
+        pressure_delta = res.get("pressure_delta", 0.0)
+        defense_segments = res.get("defense_segments", 0)
+        overtakes_suffered = res.get("overtakes_suffered", 0)
+        overtakes_made = res.get("overtakes_made", 0)
+
+        battle_pressure_tree.insert(
+            "",
+            "end",
+            values=(
+                driver_name,
+                team_name,
+                f"{res.get('attack_laps', 0)}/{laps_total} ({attack_pct:.1f}%)",
+                f"{res.get('clean_laps', 0)}/{laps_total} ({clean_pct:.1f}%)",
+                pressure_stints,
+                f"{pressure_delta:+.2f}",
+                defense_segments,
+                overtakes_suffered,
+                overtakes_made,
+                driver_number,
+            ),
+        )
+
+        try:
+            dnum_int = int(driver_number)
+        except (ValueError, TypeError):
+            continue
+
+        battle_pressure_cache[dnum_int] = res.get("detail", {})
+
+
+def on_battle_pressure_select(event=None):
+    """Handler per la selezione di una riga nella tabella Battle/Pressure."""
+    global battle_pressure_tree
+    if battle_pressure_tree is None:
+        return
+
+    selection = battle_pressure_tree.selection()
+    if not selection:
+        return
+
+    values = battle_pressure_tree.item(selection[0], "values")
+    if not values or len(values) < 10:
+        return
+
+    driver_number = values[9]
+    update_battle_pressure_plot(driver_number)
+
 
 
 def update_race_control_messages(session_key: int):
@@ -1040,6 +1256,108 @@ def find_pressure_stints(laps, gap_leader_series, interval_series):
     return segments
 
 
+def build_overtake_index(overtakes):
+    """Costruisce dizionari con sorpassi effettuati e subiti per pilota."""
+    made = {}
+    suffered = {}
+    if not isinstance(overtakes, list):
+        return made, suffered
+
+    for ot in overtakes:
+        overtaking = ot.get("overtaking_driver_number")
+        overtaken = ot.get("overtaken_driver_number")
+
+        try:
+            ovk_int = int(overtaking) if overtaking is not None else None
+            ovn_int = int(overtaken) if overtaken is not None else None
+        except (ValueError, TypeError):
+            continue
+
+        if ovk_int is not None:
+            made[ovk_int] = made.get(ovk_int, 0) + 1
+        if ovn_int is not None:
+            suffered[ovn_int] = suffered.get(ovn_int, 0) + 1
+
+    return made, suffered
+
+
+def compute_battle_pressure_for_driver(session_key, driver_number, overtake_index=None):
+    """Calcola indicatori di pressione/duello per un singolo pilota."""
+
+    overtake_index = overtake_index or {"made": {}, "suffered": {}}
+
+    try:
+        intervals = fetch_intervals(session_key, driver_number)
+    except RuntimeError:
+        return None
+
+    if not intervals:
+        return None
+
+    laps_idx = []
+    gaps_leader = []
+    gaps_prev = []
+
+    for idx, entry in enumerate(intervals, start=1):
+        lap_number = entry.get("lap_number")
+        if not isinstance(lap_number, int):
+            lap_number = idx
+
+        laps_idx.append(lap_number)
+
+        gap_leader = entry.get("gap_to_leader", None)
+        gaps_leader.append(gap_leader if isinstance(gap_leader, (int, float)) else None)
+
+        interval_val = entry.get("interval", None)
+        if isinstance(interval_val, (int, float)):
+            gaps_prev.append(interval_val)
+        else:
+            gaps_prev.append(None)
+
+    total_valid = len([v for v in gaps_prev if isinstance(v, (int, float))])
+    attack_laps = [lap for lap, val in zip(laps_idx, gaps_prev) if isinstance(val, (int, float)) and val < SLIPSTREAM_THRESHOLD]
+    clean_laps = [lap for lap, val in zip(laps_idx, gaps_prev) if isinstance(val, (int, float)) and val > CLEAN_AIR_THRESHOLD]
+
+    attack_pct = (len(attack_laps) / total_valid * 100.0) if total_valid else 0.0
+    clean_pct = (len(clean_laps) / total_valid * 100.0) if total_valid else 0.0
+
+    pressure_segments = find_pressure_stints(laps_idx, gaps_leader, gaps_prev)
+    offensive = [
+        s for s in pressure_segments if s.get("metric") == "interval" and s.get("trend") == "Avvicinamento"
+    ]
+    defensive = [
+        s for s in pressure_segments if s.get("metric") == "interval" and s.get("trend") == "Allontanamento"
+    ]
+
+    pressure_delta_sum = sum(s.get("delta", 0) for s in offensive)
+    defense_delta_sum = sum(s.get("delta", 0) for s in defensive)
+
+    made = overtake_index.get("made", {}).get(int(driver_number), 0)
+    suffered = overtake_index.get("suffered", {}).get(int(driver_number), 0)
+
+    return {
+        "driver_number": driver_number,
+        "laps_total": total_valid,
+        "attack_laps": len(attack_laps),
+        "clean_laps": len(clean_laps),
+        "attack_pct": attack_pct,
+        "clean_pct": clean_pct,
+        "pressure_stints": len(offensive),
+        "pressure_delta": pressure_delta_sum,
+        "defense_segments": len(defensive),
+        "defense_delta": defense_delta_sum,
+        "overtakes_made": made,
+        "overtakes_suffered": suffered,
+        "detail": {
+            "laps": laps_idx,
+            "intervals": gaps_prev,
+            "attack_laps": attack_laps,
+            "clean_laps": clean_laps,
+            "pressure_segments": pressure_segments,
+        },
+    }
+
+
 def compute_race_timeline(
     session_key,
     current_results_data,
@@ -1234,6 +1552,76 @@ def compute_race_timeline(
         return ts
 
     return sorted(events, key=sort_key)
+
+
+def on_compute_battle_pressure_click():
+    """Callback per calcolare il Battle / Pressure Index per i piloti della sessione."""
+    global current_results_data
+
+    session_key, session_type, _ = get_selected_session_info()
+    if session_key is None:
+        messagebox.showinfo("Info", "Seleziona prima una sessione.")
+        return
+
+    if not is_race_like(session_type):
+        messagebox.showinfo(
+            "Info", "L'analisi Battle/Pressure è disponibile solo per Race o Sprint.",
+        )
+        return
+
+    if not current_results_data:
+        messagebox.showinfo(
+            "Info", "Carica prima i risultati della sessione per ottenere l'elenco piloti.",
+        )
+        return
+
+    status_var.set("Calcolo Battle/Pressure Index in corso...")
+    root.update_idletasks()
+
+    overtakes = []
+    try:
+        overtakes = fetch_overtakes(session_key)
+    except RuntimeError:
+        overtakes = []
+
+    made_idx, suffered_idx = build_overtake_index(overtakes)
+    overtake_index = {"made": made_idx, "suffered": suffered_idx}
+
+    results = []
+    skipped = 0
+
+    for res in current_results_data:
+        driver_number = res.get("driver_number")
+        if driver_number is None:
+            continue
+
+        driver_name = res.get("full_name") or fetch_driver_full_name(driver_number, session_key)
+        team_name = res.get("team_name") or fetch_driver_team_name(driver_number, session_key)
+
+        try:
+            metrics = compute_battle_pressure_for_driver(session_key, driver_number, overtake_index)
+        except Exception:
+            metrics = None
+
+        if not metrics:
+            skipped += 1
+            continue
+
+        metrics.update({"driver_name": driver_name, "team_name": team_name})
+        results.append(metrics)
+
+    update_battle_pressure_table(results)
+    plots_notebook.select(battle_pressure_tab_frame)
+
+    if not results:
+        status_var.set("Nessun dato intervals disponibile per calcolare il Battle/Pressure Index.")
+    else:
+        status_msg = (
+            f"Battle/Pressure Index calcolato per {len(results)} piloti."
+        )
+        if skipped:
+            status_msg += f" Nessun dato disponibile per {skipped} piloti."
+        status_var.set(status_msg)
 
 
 # --------------------- Meteo sessione --------------------- #
@@ -2812,6 +3200,8 @@ def on_fetch_sessions_click():
     clear_stats_table()
     clear_pit_strategy()
     clear_race_control_table()
+    clear_battle_pressure_table()
+    clear_battle_pressure_table()
 
     year_str = year_entry.get().strip()
     if not year_str.isdigit() or len(year_str) != 4:
@@ -3750,6 +4140,7 @@ plots_notebook = ttk.Notebook(plots_shell)
 plots_notebook.pack(fill="both", expand=True, padx=4, pady=4)
 
 gap_tab_frame = ttk.Frame(plots_notebook, padding=6, style="Card.TFrame")
+battle_pressure_tab_frame = ttk.Frame(plots_notebook, padding=6, style="Card.TFrame")
 stints_tab_frame = ttk.Frame(plots_notebook, padding=6, style="Card.TFrame")
 race_control_tab_frame = ttk.Frame(plots_notebook, padding=6, style="Card.TFrame")
 team_radio_tab_frame = ttk.Frame(plots_notebook, padding=6, style="Card.TFrame")
@@ -3759,6 +4150,7 @@ pit_strategy_tab_frame = ttk.Frame(plots_notebook, padding=6, style="Card.TFrame
 race_timeline_tab_frame = ttk.Frame(plots_notebook, padding=6, style="Card.TFrame")
 
 plots_notebook.add(gap_tab_frame, text="Grafico distacchi")
+plots_notebook.add(battle_pressure_tab_frame, text="Battaglie & Pressure Index")
 plots_notebook.add(stints_tab_frame, text="Gomme: mappa & analisi")
 plots_notebook.add(race_control_tab_frame, text="Race Control")
 plots_notebook.add(team_radio_tab_frame, text="Team Radio")
@@ -3766,6 +4158,108 @@ plots_notebook.add(weather_tab_frame, text="Meteo sessione")
 plots_notebook.add(stats_tab_frame, text="Statistiche piloti")
 plots_notebook.add(pit_strategy_tab_frame, text="Pit stop & strategia")
 plots_notebook.add(race_timeline_tab_frame, text="Race Timeline")
+
+# --- Contenuto tab Battaglie & Pressure Index --- #
+battle_pressure_info_var = tk.StringVar(
+    value=(
+        "Analizza quanto un pilota è vicino all'auto davanti (attacco) o in aria pulita. "
+        "Premi 'Calcola Battle/Pressure Index' dopo aver caricato una sessione Race/Sprint."
+    )
+)
+
+battle_pressure_info_label = ttk.Label(
+    battle_pressure_tab_frame,
+    textvariable=battle_pressure_info_var,
+    anchor="w",
+    wraplength=1250,
+    style="Info.TLabel",
+)
+battle_pressure_info_label.pack(fill="x", padx=5, pady=(5, 2))
+
+battle_pressure_buttons_frame = ttk.Frame(
+    battle_pressure_tab_frame, style="Card.TFrame"
+)
+battle_pressure_buttons_frame.pack(fill="x", padx=5, pady=(0, 4))
+
+battle_pressure_button = ttk.Button(
+    battle_pressure_buttons_frame,
+    text="Calcola Battle/Pressure Index",
+    command=on_compute_battle_pressure_click,
+)
+battle_pressure_button.pack(side="left")
+
+battle_pressure_table_frame = ttk.Frame(
+    battle_pressure_tab_frame, style="Card.TFrame"
+)
+battle_pressure_table_frame.pack(fill="both", expand=True, padx=5, pady=(0, 5))
+
+battle_pressure_columns = (
+    "driver",
+    "team",
+    "attack_laps",
+    "clean_laps",
+    "pressure_stints",
+    "pressure_delta",
+    "defense_segments",
+    "overtakes_suffered",
+    "overtakes_made",
+    "driver_id_hidden",
+)
+
+battle_pressure_tree = ttk.Treeview(
+    battle_pressure_table_frame,
+    columns=battle_pressure_columns,
+    show="headings",
+    displaycolumns=battle_pressure_columns[:-1],
+    height=9,
+)
+
+battle_pressure_tree.heading("driver", text="Pilota")
+battle_pressure_tree.heading("team", text="Team")
+battle_pressure_tree.heading("attack_laps", text="Giri in attacco")
+battle_pressure_tree.heading("clean_laps", text="Aria pulita")
+battle_pressure_tree.heading("pressure_stints", text="Pressure stint")
+battle_pressure_tree.heading("pressure_delta", text="Δ totale (s)")
+battle_pressure_tree.heading("defense_segments", text="Segmenti allontanamento")
+battle_pressure_tree.heading("overtakes_suffered", text="Sorpassi subiti")
+battle_pressure_tree.heading("overtakes_made", text="Sorpassi fatti")
+
+battle_pressure_tree.column("driver", width=200, anchor="w")
+battle_pressure_tree.column("team", width=180, anchor="w")
+battle_pressure_tree.column("attack_laps", width=170, anchor="center")
+battle_pressure_tree.column("clean_laps", width=150, anchor="center")
+battle_pressure_tree.column("pressure_stints", width=120, anchor="center")
+battle_pressure_tree.column("pressure_delta", width=120, anchor="center")
+battle_pressure_tree.column("defense_segments", width=170, anchor="center")
+battle_pressure_tree.column("overtakes_suffered", width=130, anchor="center")
+battle_pressure_tree.column("overtakes_made", width=120, anchor="center")
+battle_pressure_tree.column("driver_id_hidden", width=1, anchor="center")
+
+battle_pressure_tree.bind("<<TreeviewSelect>>", on_battle_pressure_select)
+
+battle_pressure_vsb = ttk.Scrollbar(
+    battle_pressure_table_frame,
+    orient="vertical",
+    command=battle_pressure_tree.yview,
+)
+battle_pressure_tree.configure(yscrollcommand=battle_pressure_vsb.set)
+
+battle_pressure_tree.grid(row=0, column=0, sticky="nsew")
+battle_pressure_vsb.grid(row=0, column=1, sticky="ns")
+
+battle_pressure_table_frame.rowconfigure(0, weight=1)
+battle_pressure_table_frame.columnconfigure(0, weight=1)
+
+ttk.Label(
+    battle_pressure_tab_frame,
+    text="Timeline giri attacco/difesa (pilota selezionato):",
+    font=("", 9, "bold"),
+).pack(anchor="w", padx=5, pady=(0, 2))
+
+battle_pressure_plot_frame = ttk.Frame(
+    battle_pressure_tab_frame, style="Card.TFrame"
+)
+battle_pressure_plot_frame.pack(fill="both", expand=True, padx=5, pady=(0, 5))
 
 # --- Contenuto tab Grafico distacchi --- #
 gap_info_frame = ttk.Frame(gap_tab_frame, style="Card.TFrame")
