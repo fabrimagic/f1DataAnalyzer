@@ -4,6 +4,7 @@ import urllib.request
 import urllib.error
 import json
 import math
+import webbrowser
 from datetime import datetime
 
 from matplotlib.figure import Figure
@@ -19,6 +20,7 @@ API_LAPS_URL = "https://api.openf1.org/v1/laps?session_key={session_key}&driver_
 API_PIT_URL = "https://api.openf1.org/v1/pit?session_key={session_key}"
 API_WEATHER_URL = "https://api.openf1.org/v1/weather?session_key={session_key}"
 API_RACE_CONTROL_URL = "https://api.openf1.org/v1/race_control?session_key={session_key}"
+API_TEAM_RADIO_URL = "https://api.openf1.org/v1/team_radio?session_key={session_key}&driver_number={driver_number}"
 
 # Cache per le informazioni pilota
 DRIVER_CACHE = {}
@@ -39,6 +41,8 @@ gap_slipstream_var = None
 gap_pressure_tree = None
 race_control_tree = None
 race_control_info_var = None
+team_radio_tree = None
+team_radio_info_var = None
 
 # Impostazioni per identificare scia/aria pulita e momenti chiave
 SLIPSTREAM_THRESHOLD = 1.0
@@ -244,6 +248,20 @@ def fetch_race_control_messages(session_key: int):
     return messages
 
 
+def fetch_team_radio(session_key: int, driver_number):
+    """Team radio per pilota e sessione selezionati."""
+    try:
+        dn_key = int(driver_number)
+    except (ValueError, TypeError):
+        raise RuntimeError("driver_number non valido per la chiamata team radio.")
+
+    url = API_TEAM_RADIO_URL.format(session_key=session_key, driver_number=dn_key)
+    messages = http_get_json(url)
+    if not isinstance(messages, list):
+        raise RuntimeError("Formato JSON inatteso per i team radio.")
+    return messages
+
+
 # --------------------- Utility per la GUI --------------------- #
 
 def format_time_from_seconds(seconds_value):
@@ -375,6 +393,7 @@ def clear_driver_plots():
 
     clear_stints_summary_table()
     clear_race_control_table()
+    clear_team_radio_table()
 
 
 def clear_weather_plot():
@@ -407,6 +426,20 @@ def clear_race_control_table():
         race_control_info_var.set(
             "Messaggi Race Control: seleziona una sessione Race/Sprint, poi premi "
             "'Recupera messaggi Race Control' per visualizzare i dettagli."
+        )
+
+
+def clear_team_radio_table():
+    """Svuota la tabella Team Radio e ripristina il messaggio di guida."""
+    global team_radio_tree, team_radio_info_var
+    if team_radio_tree is not None:
+        for item in team_radio_tree.get_children():
+            team_radio_tree.delete(item)
+
+    if team_radio_info_var is not None:
+        team_radio_info_var.set(
+            "Team radio: seleziona una sessione e un pilota dai risultati, poi premi "
+            "'Team radio pilota' per caricare i messaggi disponibili."
         )
 
 
@@ -513,6 +546,110 @@ def update_race_control_messages(session_key: int):
             f"{len(sorted_msgs)} messaggi Race Control per la sessione (ordinati per giro e data)."
         )
 
+
+def update_team_radio_table(session_key: int, driver_number, driver_name: str):
+    """Scarica e mostra i team radio per il pilota selezionato."""
+    global team_radio_tree, team_radio_info_var
+
+    clear_team_radio_table()
+
+    if team_radio_tree is None:
+        return
+
+    if team_radio_info_var is not None:
+        team_radio_info_var.set(
+            f"Scarico team radio per sessione {session_key}, pilota {driver_number}..."
+        )
+
+    try:
+        messages = fetch_team_radio(session_key, driver_number)
+    except RuntimeError as e:
+        if team_radio_info_var is not None:
+            team_radio_info_var.set("Errore nel recupero dei team radio.")
+        messagebox.showerror("Errore Team Radio", str(e))
+        return
+
+    if not messages:
+        if team_radio_info_var is not None:
+            team_radio_info_var.set(
+                f"Nessun team radio disponibile per il pilota {driver_number} in questa sessione."
+            )
+        return
+
+    try:
+        sorted_msgs = sorted(
+            messages,
+            key=lambda m: m.get("date", ""),
+        )
+    except Exception:
+        sorted_msgs = messages
+
+    for msg in sorted_msgs:
+        raw_date = msg.get("date", "")
+        parsed = parse_iso_datetime(raw_date)
+        date_str = parsed.strftime("%Y-%m-%d %H:%M:%S") if parsed else str(raw_date)
+
+        lap_number = msg.get("lap_number", "")
+        lap_str = lap_number if isinstance(lap_number, int) else ""
+        recording_url = msg.get("recording_url", "")
+
+        team_radio_tree.insert(
+            "",
+            "end",
+            values=(date_str, lap_str, recording_url),
+        )
+
+    if team_radio_info_var is not None:
+        driver_label = driver_name if driver_name else f"Driver {driver_number}"
+        team_radio_info_var.set(
+            f"{len(sorted_msgs)} team radio per {driver_label}. Seleziona una riga e premi 'Riproduci' oppure fai doppio click."
+        )
+
+
+def on_play_team_radio_click(event=None):
+    """Riproduce l'audio del team radio selezionato aprendo l'URL nel browser di sistema."""
+    global team_radio_tree
+
+    if team_radio_tree is None:
+        return
+
+    selection = team_radio_tree.selection()
+    if not selection:
+        messagebox.showinfo("Info", "Seleziona prima un team radio da riprodurre.")
+        return
+
+    item_id = selection[0]
+    values = team_radio_tree.item(item_id, "values")
+    if not values or len(values) < 3:
+        messagebox.showinfo("Info", "Nessun URL disponibile per questo team radio.")
+        return
+
+    url = values[2]
+    if not url:
+        messagebox.showinfo("Info", "Nessun URL disponibile per questo team radio.")
+        return
+
+    try:
+        webbrowser.open_new(url)
+    except Exception:
+        messagebox.showerror(
+            "Errore", "Impossibile aprire il browser per riprodurre il team radio."
+        )
+
+
+def on_fetch_team_radio_click():
+    """Handler per caricare i team radio del pilota selezionato."""
+    session_key, _, _ = get_selected_session_info()
+    if session_key is None:
+        messagebox.showinfo("Info", "Seleziona prima una sessione.")
+        return
+
+    driver_number, driver_name = get_selected_driver_info()
+    if driver_number is None:
+        messagebox.showinfo("Info", "Seleziona un pilota nella tabella dei risultati.")
+        return
+
+    update_team_radio_table(session_key, driver_number, driver_name)
 
 def clear_stints_summary_table():
     """Svuota la tabella riassuntiva degli stint."""
@@ -2114,12 +2251,15 @@ def on_show_driver_plots_click():
             "Nessun dato giri disponibile per questo pilota in questa sessione."
         )
 
+    update_team_radio_table(session_key, driver_number, title_driver)
+
     plots_notebook.select(gap_tab_frame)
 
     status_var.set(
         f"Grafici, analisi gomme e tabella giri aggiornati per pilota {driver_number} ({title_driver}). "
         "La tabella pit stop mostra tutti i pit della sessione; la tab Meteo mostra l'evoluzione meteo. "
-        "Premi 'Recupera messaggi Race Control' per caricare i messaggi della sessione."
+        "Premi 'Recupera messaggi Race Control' per caricare i messaggi della sessione. "
+        "La tab Team Radio contiene le registrazioni scaricate per il pilota selezionato."
     )
 
 
@@ -2318,7 +2458,14 @@ race_control_action = ttk.Button(
 )
 race_control_action.grid(row=0, column=4, padx=4, pady=2, sticky="ew")
 
-actions_frame.columnconfigure((0, 1, 2, 3, 4), weight=1)
+team_radio_button = ttk.Button(
+    actions_frame,
+    text="Team radio pilota",
+    command=on_fetch_team_radio_click,
+)
+team_radio_button.grid(row=0, column=5, padx=4, pady=2, sticky="ew")
+
+actions_frame.columnconfigure((0, 1, 2, 3, 4, 5), weight=1)
 
 # --- Layout principale con paned window per mostrare tutte le sezioni --- #
 main_paned = ttk.Panedwindow(root, orient=tk.VERTICAL)
@@ -2593,6 +2740,7 @@ plots_notebook.pack(fill="both", expand=True, padx=4, pady=4)
 gap_tab_frame = ttk.Frame(plots_notebook, padding=6, style="Card.TFrame")
 stints_tab_frame = ttk.Frame(plots_notebook, padding=6, style="Card.TFrame")
 race_control_tab_frame = ttk.Frame(plots_notebook, padding=6, style="Card.TFrame")
+team_radio_tab_frame = ttk.Frame(plots_notebook, padding=6, style="Card.TFrame")
 weather_tab_frame = ttk.Frame(plots_notebook, padding=6, style="Card.TFrame")
 stats_tab_frame = ttk.Frame(plots_notebook, padding=6, style="Card.TFrame")
 pit_strategy_tab_frame = ttk.Frame(plots_notebook, padding=6, style="Card.TFrame")
@@ -2600,6 +2748,7 @@ pit_strategy_tab_frame = ttk.Frame(plots_notebook, padding=6, style="Card.TFrame
 plots_notebook.add(gap_tab_frame, text="Grafico distacchi")
 plots_notebook.add(stints_tab_frame, text="Gomme: mappa & analisi")
 plots_notebook.add(race_control_tab_frame, text="Race Control")
+plots_notebook.add(team_radio_tab_frame, text="Team Radio")
 plots_notebook.add(weather_tab_frame, text="Meteo sessione")
 plots_notebook.add(stats_tab_frame, text="Statistiche piloti")
 plots_notebook.add(pit_strategy_tab_frame, text="Pit stop & strategia")
@@ -2726,6 +2875,57 @@ race_control_vsb.grid(row=0, column=1, sticky="ns")
 
 race_control_frame.rowconfigure(0, weight=1)
 race_control_frame.columnconfigure(0, weight=1)
+
+# --- Contenuto tab Team Radio --- #
+team_radio_info_var = tk.StringVar(
+    value=(
+        "Team radio: seleziona una sessione e un pilota dai risultati, poi premi "
+        "'Team radio pilota' per caricare i messaggi disponibili."
+    )
+)
+team_radio_info_label = ttk.Label(
+    team_radio_tab_frame,
+    textvariable=team_radio_info_var,
+    anchor="w",
+    wraplength=1250,
+    style="Info.TLabel",
+)
+team_radio_info_label.pack(fill="x", padx=5, pady=(5, 2))
+
+team_radio_columns = ("timestamp", "lap_number", "recording_url")
+team_radio_tree = ttk.Treeview(
+    team_radio_tab_frame,
+    columns=team_radio_columns,
+    show="headings",
+    height=12,
+)
+
+team_radio_tree.heading("timestamp", text="Data / Ora (UTC)")
+team_radio_tree.heading("lap_number", text="Giro")
+team_radio_tree.heading("recording_url", text="URL registrazione")
+
+team_radio_tree.column("timestamp", width=170, anchor="center")
+team_radio_tree.column("lap_number", width=70, anchor="center")
+team_radio_tree.column("recording_url", width=520, anchor="w")
+
+team_radio_vsb = ttk.Scrollbar(
+    team_radio_tab_frame, orient="vertical", command=team_radio_tree.yview
+)
+team_radio_tree.configure(yscrollcommand=team_radio_vsb.set)
+
+team_radio_tree.pack(side="left", fill="both", expand=True, padx=(5, 0), pady=5)
+team_radio_vsb.pack(side="right", fill="y", padx=(0, 5), pady=5)
+
+team_radio_tree.bind("<Double-1>", on_play_team_radio_click)
+
+team_radio_buttons = ttk.Frame(team_radio_tab_frame, style="Card.TFrame")
+team_radio_buttons.pack(fill="x", padx=5, pady=(0, 5))
+
+ttk.Button(
+    team_radio_buttons,
+    text="Riproduci selezione",
+    command=on_play_team_radio_click,
+).pack(side="left", padx=(0, 6))
 
 # --- Contenuto tab Gomme (stints_tab_frame) --- #
 stints_mode_var = tk.StringVar(value="map")
