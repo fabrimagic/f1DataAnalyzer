@@ -24,6 +24,7 @@ DRIVER_CACHE = {}
 # Canvas matplotlib per i grafici (uno per tab)
 gap_plot_canvas = None
 stints_plot_canvas = None
+gap_plot_frame = None
 
 # Dati e handler per il click sul grafico distacchi
 gap_fig = None
@@ -31,6 +32,14 @@ gap_ax = None
 gap_click_cid = None
 gap_click_data = {"laps": [], "gap_leader": [], "gap_prev": []}
 gap_point_info_var = None  # inizializzato dopo la creazione della GUI
+gap_slipstream_var = None
+gap_pressure_tree = None
+
+# Impostazioni per identificare scia/aria pulita e momenti chiave
+SLIPSTREAM_THRESHOLD = 1.0
+CLEAN_AIR_THRESHOLD = 2.5
+PRESSURE_DELTA_THRESHOLD = 1.5
+PRESSURE_WINDOW = 3
 
 # Meteo
 weather_canvas = None
@@ -278,6 +287,8 @@ def clear_driver_plots():
             "Clicca un punto sul grafico distacchi per vedere gap_to_leader e interval."
         )
 
+    reset_gap_insights()
+
     # Reset dati stint/laps del pilota
     current_stints_data = []
     current_laps_data = []
@@ -308,6 +319,41 @@ def clear_stats_table():
     if stats_tree is not None:
         for item in stats_tree.get_children():
             stats_tree.delete(item)
+
+
+def reset_gap_insights():
+    """Ripristina le info scia/aria pulita e la tabella momenti chiave."""
+    global gap_slipstream_var, gap_pressure_tree
+    if gap_slipstream_var is not None:
+        gap_slipstream_var.set("In scia: -- | Aria pulita: --")
+
+    if gap_pressure_tree is not None:
+        for item in gap_pressure_tree.get_children():
+            gap_pressure_tree.delete(item)
+
+
+def update_pressure_table(segments):
+    """Popola la tabella con i tratti di avvicinamento/allontanamento."""
+    global gap_pressure_tree
+    if gap_pressure_tree is None:
+        return
+
+    for item in gap_pressure_tree.get_children():
+        gap_pressure_tree.delete(item)
+
+    for seg in segments:
+        delta_str = f"{seg['delta']:+.2f}"
+        gap_pressure_tree.insert(
+            "",
+            "end",
+            values=(
+                seg["metric"],
+                seg["trend"],
+                seg["start_lap"],
+                seg["end_lap"],
+                delta_str,
+            ),
+        )
 
 
 def clear_stints_summary_table():
@@ -372,6 +418,63 @@ def on_gap_plot_click(event):
         gap_point_info_var.set(
             f"Giro {lap_num}: gap_to_leader = {gl_str} s, interval = {gp_str} s"
         )
+
+
+def compute_slipstream_stats(interval_values):
+    """Calcola percentuali di giri in scia e in aria pulita con soglie fisse."""
+    valid = [v for v in interval_values if isinstance(v, (int, float))]
+    if not valid:
+        return 0.0, 0.0
+
+    in_scia = sum(1 for v in valid if v < SLIPSTREAM_THRESHOLD)
+    aria_pulita = sum(1 for v in valid if v > CLEAN_AIR_THRESHOLD)
+    total = len(valid)
+
+    return (in_scia / total) * 100.0, (aria_pulita / total) * 100.0
+
+
+def find_pressure_stints(laps, gap_leader_series, interval_series):
+    """
+    Identifica segmenti in cui il gap cala o aumenta rapidamente.
+
+    Restituisce una lista di dict con: metric (leader/interval), trend, start_lap,
+    end_lap, delta e indice centrale per il marker grafico.
+    """
+
+    def analyze_series(series, metric_name):
+        segments = []
+        for i in range(len(series) - PRESSURE_WINDOW + 1):
+            start_val = series[i]
+            end_val = series[i + PRESSURE_WINDOW - 1]
+            if start_val is None or end_val is None:
+                continue
+
+            delta = end_val - start_val
+            if delta <= -PRESSURE_DELTA_THRESHOLD:
+                trend = "Avvicinamento"
+            elif delta >= PRESSURE_DELTA_THRESHOLD:
+                trend = "Allontanamento"
+            else:
+                continue
+
+            center_idx = i + (PRESSURE_WINDOW // 2)
+            segments.append(
+                {
+                    "metric": metric_name,
+                    "trend": trend,
+                    "start_lap": laps[i],
+                    "end_lap": laps[i + PRESSURE_WINDOW - 1],
+                    "delta": delta,
+                    "marker_x": laps[center_idx],
+                    "marker_y": series[center_idx],
+                }
+            )
+        return segments
+
+    segments = []
+    segments.extend(analyze_series(gap_leader_series, "gap_to_leader"))
+    segments.extend(analyze_series(interval_series, "interval"))
+    return segments
 
 
 # --------------------- Meteo sessione --------------------- #
@@ -1481,16 +1584,52 @@ def on_show_driver_plots_click():
         ax_gap = fig_gap.add_subplot(111)
 
         ax_gap.plot(laps_idx, gaps_leader, marker="o", label="Gap dal leader (s)")
-        ax_gap.plot(laps_idx, gaps_prev, marker="o", linestyle="--", label="Gap dal pilota davanti (s)")
+        ax_gap.plot(
+            laps_idx, gaps_prev, marker="o", linestyle="--", label="Gap dal pilota davanti (s)"
+        )
 
         ax_gap.set_xlabel("Giro (indice dei dati intervals)")
         ax_gap.set_ylabel("Distacco (secondi)")
         ax_gap.set_title(f"Distacchi giro per giro - {title_driver}")
         ax_gap.grid(True)
-        ax_gap.legend()
+        # Statistiche scia/aria pulita e tratti di pressione
+        in_scia_pct, aria_pulita_pct = compute_slipstream_stats(gaps_prev)
+        if gap_slipstream_var is not None:
+            gap_slipstream_var.set(
+                f"In scia: {in_scia_pct:.1f}% | Aria pulita: {aria_pulita_pct:.1f}%"
+            )
+
+        pressure_segments = find_pressure_stints(laps_idx, gaps_leader, gaps_prev)
+        update_pressure_table(pressure_segments)
+
+        marker_styles = {
+            "Avvicinamento": {"color": "tab:green", "marker": "^"},
+            "Allontanamento": {"color": "tab:red", "marker": "v"},
+        }
+        used_labels = set()
+        for seg in pressure_segments:
+            style = marker_styles.get(seg["trend"], {})
+            y_val = seg.get("marker_y")
+            if y_val is None:
+                continue
+            label_key = f"{seg['trend']} ({seg['metric']})"
+            label = None if label_key in used_labels else label_key
+            used_labels.add(label_key)
+            ax_gap.scatter(
+                seg["marker_x"],
+                y_val,
+                color=style.get("color", "black"),
+                marker=style.get("marker", "o"),
+                s=70,
+                zorder=3,
+                label=label,
+            )
+
+        handles, labels = ax_gap.get_legend_handles_labels()
+        ax_gap.legend(handles, labels)
 
         global gap_plot_canvas, gap_fig, gap_ax, gap_click_cid, gap_click_data
-        gap_plot_canvas = FigureCanvasTkAgg(fig_gap, master=gap_tab_frame)
+        gap_plot_canvas = FigureCanvasTkAgg(fig_gap, master=gap_plot_frame)
         gap_plot_canvas.get_tk_widget().pack(fill="both", expand=True)
         gap_plot_canvas.draw()
 
@@ -1919,6 +2058,58 @@ plots_notebook.add(stints_tab_frame, text="Gomme: mappa & analisi")
 plots_notebook.add(weather_tab_frame, text="Meteo sessione")
 plots_notebook.add(stats_tab_frame, text="Statistiche piloti")
 plots_notebook.add(pit_strategy_tab_frame, text="Pit stop & strategia")
+
+# --- Contenuto tab Grafico distacchi --- #
+gap_info_frame = ttk.Frame(gap_tab_frame)
+gap_info_frame.pack(fill="x", padx=5, pady=(5, 2))
+
+gap_slipstream_var = tk.StringVar(value="In scia: -- | Aria pulita: --")
+gap_slipstream_label = ttk.Label(
+    gap_info_frame,
+    textvariable=gap_slipstream_var,
+    font=("", 10, "bold"),
+    anchor="w",
+)
+gap_slipstream_label.pack(side="left")
+
+ttk.Label(
+    gap_info_frame,
+    text="Soglie: interval < 1.0s = scia, interval > 2.5s = aria pulita",
+).pack(side="left", padx=(10, 0))
+
+gap_plot_frame = ttk.Frame(gap_tab_frame)
+gap_plot_frame.pack(fill="both", expand=True, padx=5, pady=(0, 4))
+
+gap_pressure_frame = ttk.LabelFrame(
+    gap_tab_frame,
+    text="Stints di pressione (variazioni rapide di gap)",
+)
+gap_pressure_frame.pack(fill="x", padx=5, pady=(0, 5))
+
+pressure_columns = (
+    "metric",
+    "trend",
+    "start",
+    "end",
+    "delta",
+)
+
+gap_pressure_tree = ttk.Treeview(
+    gap_pressure_frame, columns=pressure_columns, show="headings", height=4
+)
+gap_pressure_tree.heading("metric", text="Metrica")
+gap_pressure_tree.heading("trend", text="Trend")
+gap_pressure_tree.heading("start", text="Inizio")
+gap_pressure_tree.heading("end", text="Fine")
+gap_pressure_tree.heading("delta", text="Δ gap (s)")
+
+gap_pressure_tree.column("metric", width=120, anchor="w")
+gap_pressure_tree.column("trend", width=120, anchor="center")
+gap_pressure_tree.column("start", width=80, anchor="center")
+gap_pressure_tree.column("end", width=80, anchor="center")
+gap_pressure_tree.column("delta", width=100, anchor="center")
+
+gap_pressure_tree.pack(fill="x", padx=5, pady=4)
 
 # --- Contenuto tab Gomme (stints_tab_frame) --- #
 stints_mode_var = tk.StringVar(value="map")
