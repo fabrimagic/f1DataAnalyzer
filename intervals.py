@@ -79,6 +79,16 @@ weather_perf_info_var = None
 weather_perf_plot_frame = None
 weather_last_data = []
 weather_last_session_key = None
+weather_phase_tree = None
+weather_phase_canvas = None
+weather_phase_fig = None
+weather_phase_plot_frame = None
+weather_phase_info_var = None
+compound_weather_tree = None
+compound_weather_canvas = None
+compound_weather_fig = None
+compound_weather_plot_frame = None
+compound_weather_info_var = None
 
 # Statistiche piloti (lap time)
 stats_tree = None
@@ -490,6 +500,8 @@ def clear_driver_plots():
     clear_stints_summary_table()
     clear_race_control_table()
     clear_team_radio_table()
+    clear_rain_impact_outputs()
+    clear_compound_weather_outputs()
 
 
 def clear_weather_plot():
@@ -509,6 +521,40 @@ def clear_weather_plot():
 
     update_weather_stats_box()
     clear_weather_performance_plot()
+    clear_rain_impact_outputs()
+    clear_compound_weather_outputs()
+
+
+def clear_rain_impact_outputs():
+    """Ripulisce tabella e grafico dell'analisi pioggia."""
+    global weather_phase_tree, weather_phase_canvas, weather_phase_fig, weather_phase_info_var
+    if weather_phase_tree is not None:
+        for item in weather_phase_tree.get_children():
+            weather_phase_tree.delete(item)
+    if weather_phase_canvas is not None:
+        weather_phase_canvas.get_tk_widget().destroy()
+        weather_phase_canvas = None
+    weather_phase_fig = None
+    if weather_phase_info_var is not None:
+        weather_phase_info_var.set(
+            "Analizza l'impatto della pioggia sul passo gara dopo aver caricato meteo e giri del pilota."
+        )
+
+
+def clear_compound_weather_outputs():
+    """Ripulisce tabella e grafico dell'analisi compound vs meteo."""
+    global compound_weather_tree, compound_weather_canvas, compound_weather_fig, compound_weather_info_var
+    if compound_weather_tree is not None:
+        for item in compound_weather_tree.get_children():
+            compound_weather_tree.delete(item)
+    if compound_weather_canvas is not None:
+        compound_weather_canvas.get_tk_widget().destroy()
+        compound_weather_canvas = None
+    compound_weather_fig = None
+    if compound_weather_info_var is not None:
+        compound_weather_info_var.set(
+            "Analizza i compound rispetto alla temperatura pista dopo aver caricato giri e stint."
+        )
 
 
 def clear_race_control_table():
@@ -1932,6 +1978,360 @@ def update_weather_performance_plot(session_key: int, driver_label: str = None):
         info_lines.append(f"Correlazione (Pearson): {corr:.2f}")
     if weather_perf_info_var is not None:
         weather_perf_info_var.set(" ".join(info_lines))
+
+
+# --------------------- Analisi meteo-strategia avanzata --------------------- #
+
+def _build_weather_points_with_phase_markers():
+    """Ritorna lista di campioni meteo con info utili e indici ordinati."""
+    weather_points = []
+    for idx, w in enumerate(weather_last_data or []):
+        dt = parse_iso_datetime(w.get("date", ""))
+        if dt is None:
+            continue
+        rainfall = w.get("rainfall")
+        rainfall_val = float(rainfall) if isinstance(rainfall, (int, float)) else 0.0
+        weather_points.append(
+            {
+                "idx": idx,
+                "dt": dt,
+                "rainfall": rainfall_val,
+                "track_temp": w.get("track_temperature"),
+                "humidity": w.get("humidity"),
+            }
+        )
+    return weather_points
+
+
+def _classify_weather_phase(sample_idx, rainfall_val, humidity_val, first_rain_idx, transition_range, first_rain_humidity):
+    """Ritorna etichetta fase meteo per un campione meteo indicizzato."""
+    if first_rain_idx is None:
+        return "DRY"
+
+    start_tr, end_tr = transition_range
+    if start_tr <= sample_idx <= end_tr:
+        return "TRANSITION"
+
+    humidity_jump = False
+    if isinstance(humidity_val, (int, float)) and isinstance(first_rain_humidity, (int, float)):
+        humidity_jump = (humidity_val - first_rain_humidity) >= 8
+
+    if rainfall_val > 0:
+        return "WET"
+    if humidity_jump:
+        return "TRANSITION"
+    return "DRY"
+
+
+def on_compute_rain_impact_click():
+    """Calcola impatto della pioggia sul passo gara del pilota selezionato."""
+    session_key, _, _ = get_selected_session_info()
+    if session_key is None:
+        messagebox.showinfo("Info", "Seleziona prima una sessione.")
+        return
+
+    driver_number, driver_name = get_selected_driver_info()
+    if driver_number is None:
+        messagebox.showinfo("Info", "Seleziona un pilota nella tabella risultati.")
+        return
+
+    if not weather_last_data or weather_last_session_key != session_key:
+        messagebox.showinfo("Info", "Scarica prima i dati meteo della sessione.")
+        return
+
+    if not current_laps_data or current_laps_session_key != session_key:
+        messagebox.showinfo("Info", "Carica prima i giri del pilota selezionato.")
+        return
+
+    clear_rain_impact_outputs()
+
+    weather_points = _build_weather_points_with_phase_markers()
+    if not weather_points:
+        if weather_phase_info_var is not None:
+            weather_phase_info_var.set("Nessun campione meteo valido per l'analisi.")
+        return
+
+    first_rain_idx = None
+    for wp in weather_points:
+        if wp.get("rainfall", 0) > 0:
+            first_rain_idx = wp["idx"]
+            break
+
+    transition_range = (0, -1)
+    first_rain_humidity = None
+    if first_rain_idx is not None:
+        transition_range = (max(0, first_rain_idx - 2), first_rain_idx + 2)
+        first_match = next((w for w in weather_points if w["idx"] == first_rain_idx), None)
+        first_rain_humidity = first_match.get("humidity") if first_match else None
+
+    phases_data = {"DRY": [], "TRANSITION": [], "WET": []}
+
+    for lap in current_laps_data:
+        if lap.get("is_pit_out_lap", False):
+            continue
+        lap_time = lap.get("lap_duration")
+        if not isinstance(lap_time, (int, float)):
+            continue
+        lap_dt = parse_iso_datetime(lap.get("date_start", ""))
+        if lap_dt is None:
+            continue
+
+        nearest = min(
+            weather_points,
+            key=lambda wp: abs((lap_dt - wp["dt"]).total_seconds()),
+        )
+
+        phase_label = _classify_weather_phase(
+            nearest["idx"],
+            nearest.get("rainfall", 0),
+            nearest.get("humidity"),
+            first_rain_idx,
+            transition_range,
+            first_rain_humidity,
+        )
+
+        phases_data.setdefault(phase_label, []).append(
+            {
+                "lap_number": lap.get("lap_number"),
+                "lap_time": float(lap_time),
+                "rainfall": nearest.get("rainfall", 0),
+            }
+        )
+
+    if all(not lst for lst in phases_data.values()):
+        if weather_phase_info_var is not None:
+            weather_phase_info_var.set("Nessun giro valido per calcolare l'impatto della pioggia.")
+        return
+
+    phase_rows = []
+    colors = {"DRY": "tab:green", "TRANSITION": "tab:orange", "WET": "tab:blue"}
+    markers = {"DRY": "o", "TRANSITION": "s", "WET": "^"}
+
+    for phase_name, laps_list in phases_data.items():
+        if not laps_list:
+            continue
+        times = [l["lap_time"] for l in laps_list if isinstance(l.get("lap_time"), float)]
+        if not times:
+            continue
+        count = len(times)
+        mean_val = sum(times) / count
+        var = sum((t - mean_val) ** 2 for t in times) / count if count else 0
+        std_val = math.sqrt(var) if count else None
+        best_val = min(times)
+
+        avg_str = format_time_from_seconds(mean_val)
+        best_str = format_time_from_seconds(best_val)
+        std_str = f"{std_val:.3f}" if isinstance(std_val, (int, float)) else ""
+
+        avg_rain = compute_mean([l.get("rainfall") for l in laps_list])
+        if isinstance(avg_rain, (int, float)) and avg_rain > 0:
+            note = "Pioggia leggera" if avg_rain < 1 else "Full wet/Inter"
+        else:
+            note = ""
+
+        phase_rows.append(
+            {
+                "phase": phase_name,
+                "laps": count,
+                "avg": avg_str,
+                "best": best_str,
+                "std": std_str,
+                "note": note,
+                "plot_data": laps_list,
+                "color": colors.get(phase_name, "tab:gray"),
+                "marker": markers.get(phase_name, "o"),
+            }
+        )
+
+    if weather_phase_tree is not None:
+        for row in phase_rows:
+            weather_phase_tree.insert(
+                "",
+                tk.END,
+                values=(row["phase"], row["laps"], row["avg"], row["best"], row["std"], row["note"]),
+            )
+
+    if phase_rows:
+        fig_local = Figure(figsize=(6, 3.2))
+        ax = fig_local.add_subplot(111)
+        for row in phase_rows:
+            xs = [d.get("lap_number") for d in row["plot_data"] if isinstance(d.get("lap_number"), int)]
+            ys = [d.get("lap_time") for d in row["plot_data"] if isinstance(d.get("lap_time"), float)]
+            if not xs or not ys:
+                continue
+            ax.scatter(xs, ys, label=row["phase"], color=row["color"], marker=row["marker"], alpha=0.8)
+
+        ax.set_xlabel("Giro")
+        ax.set_ylabel("Lap time (s)")
+        ax.set_title(f"Impatto pioggia - {driver_name}")
+        ax.grid(True)
+        ax.legend()
+
+        global weather_phase_canvas, weather_phase_fig
+        weather_phase_fig = fig_local
+        weather_phase_canvas = FigureCanvasTkAgg(fig_local, master=weather_phase_plot_frame)
+        weather_phase_canvas.get_tk_widget().pack(fill="both", expand=True)
+        weather_phase_canvas.draw()
+
+    if weather_phase_info_var is not None:
+        laps_used = sum(row.get("laps", 0) for row in phase_rows)
+        phase_names = [row.get("phase", "") for row in phase_rows]
+        weather_phase_info_var.set(
+            f"Analisi completata su {laps_used} giri. Fasi rilevate: {', '.join(phase_names)}."
+        )
+
+
+def on_compute_compound_weather_click():
+    """Analizza performance dei compound rispetto alla temperatura pista."""
+    session_key, _, _ = get_selected_session_info()
+    if session_key is None:
+        messagebox.showinfo("Info", "Seleziona prima una sessione.")
+        return
+
+    driver_number, driver_name = get_selected_driver_info()
+    if driver_number is None:
+        messagebox.showinfo("Info", "Seleziona un pilota nella tabella risultati.")
+        return
+
+    if not weather_last_data or weather_last_session_key != session_key:
+        messagebox.showinfo("Info", "Scarica prima i dati meteo della sessione.")
+        return
+
+    if not current_laps_data or current_laps_session_key != session_key:
+        messagebox.showinfo("Info", "Carica prima i giri del pilota selezionato.")
+        return
+
+    if not current_stints_data:
+        messagebox.showinfo("Info", "Nessun dato stint disponibile per il pilota selezionato.")
+        return
+
+    clear_compound_weather_outputs()
+
+    weather_points = _build_weather_points_with_phase_markers()
+    if not weather_points:
+        if compound_weather_info_var is not None:
+            compound_weather_info_var.set("Nessun campione meteo valido per associare track temp.")
+        return
+
+    stint_spans = []
+    for stint in current_stints_data:
+        lap_start = stint.get("lap_start")
+        lap_end = stint.get("lap_end")
+        compound = (stint.get("compound") or "").upper()
+        if not isinstance(lap_start, int) or not isinstance(lap_end, int):
+            continue
+        stint_spans.append({"lap_start": lap_start, "lap_end": lap_end, "compound": compound})
+
+    compound_data = {}
+
+    for lap in current_laps_data:
+        if lap.get("is_pit_out_lap", False):
+            continue
+        lap_time = lap.get("lap_duration")
+        lap_number = lap.get("lap_number")
+        if not isinstance(lap_time, (int, float)) or not isinstance(lap_number, int):
+            continue
+        lap_dt = parse_iso_datetime(lap.get("date_start", ""))
+        if lap_dt is None:
+            continue
+
+        stint_for_lap = next(
+            (s for s in stint_spans if s["lap_start"] <= lap_number <= s["lap_end"]),
+            None,
+        )
+        if not stint_for_lap or not stint_for_lap.get("compound"):
+            continue
+
+        nearest_weather = min(
+            weather_points,
+            key=lambda wp: abs((lap_dt - wp["dt"]).total_seconds()),
+        )
+        track_temp = nearest_weather.get("track_temp")
+        if not isinstance(track_temp, (int, float)):
+            continue
+
+        comp_key = stint_for_lap["compound"]
+        compound_data.setdefault(comp_key, []).append(
+            {
+                "track_temp": float(track_temp),
+                "lap_time": float(lap_time),
+                "lap_number": lap_number,
+            }
+        )
+
+    if not compound_data:
+        if compound_weather_info_var is not None:
+            compound_weather_info_var.set("Nessun giro valido per associare compound e meteo.")
+        return
+
+    rows = []
+    default_colors = {
+        "SOFT": "tab:red",
+        "MEDIUM": "tab:orange",
+        "HARD": "tab:gray",
+        "INTERMEDIATE": "tab:green",
+        "WET": "tab:blue",
+    }
+
+    for comp, samples in compound_data.items():
+        temps = [s["track_temp"] for s in samples if isinstance(s.get("track_temp"), float)]
+        times = [s["lap_time"] for s in samples if isinstance(s.get("lap_time"), float)]
+        if not temps or not times:
+            continue
+        avg_temp = compute_mean(temps)
+        avg_time = compute_mean(times)
+
+        rows.append(
+            {
+                "compound": comp,
+                "avg_temp": avg_temp,
+                "avg_time": avg_time,
+                "laps": len(times),
+                "color": default_colors.get(comp, "tab:purple"),
+                "samples": samples,
+            }
+        )
+
+    if compound_weather_tree is not None:
+        for row in rows:
+            compound_weather_tree.insert(
+                "",
+                tk.END,
+                values=(
+                    row["compound"],
+                    f"{row['avg_temp']:.1f}°C" if isinstance(row.get("avg_temp"), (int, float)) else "",
+                    format_time_from_seconds(row.get("avg_time")),
+                    row.get("laps", 0),
+                ),
+            )
+
+    if rows:
+        fig_local = Figure(figsize=(6, 3.2))
+        ax = fig_local.add_subplot(111)
+
+        for row in rows:
+            temps = [s.get("track_temp") for s in row["samples"] if isinstance(s.get("track_temp"), float)]
+            times = [s.get("lap_time") for s in row["samples"] if isinstance(s.get("lap_time"), float)]
+            if not temps or not times:
+                continue
+            ax.scatter(temps, times, label=row["compound"], color=row["color"], alpha=0.8)
+
+        ax.set_xlabel("Track temperature (°C)")
+        ax.set_ylabel("Lap time (s)")
+        ax.set_title(f"Compound vs track temp - {driver_name}")
+        ax.grid(True)
+        ax.legend()
+
+        global compound_weather_canvas, compound_weather_fig
+        compound_weather_fig = fig_local
+        compound_weather_canvas = FigureCanvasTkAgg(fig_local, master=compound_weather_plot_frame)
+        compound_weather_canvas.get_tk_widget().pack(fill="both", expand=True)
+        compound_weather_canvas.draw()
+
+    if compound_weather_info_var is not None:
+        compound_weather_info_var.set(
+            f"Analisi completata per {len(rows)} compound. Seleziona altri piloti per confrontare i dati."
+        )
 
 
 # --------------------- Statistiche piloti (lap time & consistenza) --------------------- #
@@ -4681,6 +5081,137 @@ weather_perf_plot_frame.pack(fill="both", expand=True, padx=5, pady=(0, 5))
 weather_charts_container.columnconfigure(0, weight=1)
 weather_charts_container.columnconfigure(1, weight=1)
 weather_charts_container.rowconfigure(0, weight=1)
+
+weather_advanced_section = ttk.LabelFrame(
+    weather_tab_frame, text="Analisi meteo-strategia avanzata"
+)
+weather_advanced_section.pack(fill="both", expand=True, padx=5, pady=(0, 5))
+
+weather_phase_section = ttk.LabelFrame(
+    weather_advanced_section, text="Impatto pioggia sul passo gara"
+)
+weather_phase_section.grid(row=0, column=0, sticky="nsew", padx=(0, 4), pady=0)
+
+weather_phase_info_var = tk.StringVar(
+    value="Analizza l'impatto della pioggia sul passo gara del pilota selezionato."
+)
+ttk.Label(
+    weather_phase_section,
+    textvariable=weather_phase_info_var,
+    anchor="w",
+    wraplength=580,
+).pack(fill="x", padx=5, pady=(4, 2))
+
+weather_phase_buttons = ttk.Frame(weather_phase_section)
+weather_phase_buttons.pack(fill="x", padx=5, pady=(0, 4))
+
+ttk.Button(
+    weather_phase_buttons,
+    text="Analisi impatto pioggia",
+    command=on_compute_rain_impact_click,
+).pack(side="left")
+
+weather_phase_table_frame = ttk.Frame(weather_phase_section)
+weather_phase_table_frame.pack(fill="both", expand=True, padx=5, pady=(0, 4))
+
+phase_columns = ("phase", "laps", "avg", "best", "std", "note")
+weather_phase_tree = ttk.Treeview(
+    weather_phase_table_frame,
+    columns=phase_columns,
+    show="headings",
+    height=6,
+)
+weather_phase_tree.heading("phase", text="Phase")
+weather_phase_tree.heading("laps", text="Laps")
+weather_phase_tree.heading("avg", text="Avg lap time")
+weather_phase_tree.heading("best", text="Best lap")
+weather_phase_tree.heading("std", text="σ lap")
+weather_phase_tree.heading("note", text="Note")
+
+weather_phase_tree.column("phase", width=100, anchor="center")
+weather_phase_tree.column("laps", width=60, anchor="center")
+weather_phase_tree.column("avg", width=120, anchor="center")
+weather_phase_tree.column("best", width=120, anchor="center")
+weather_phase_tree.column("std", width=90, anchor="center")
+weather_phase_tree.column("note", width=200, anchor="w")
+
+weather_phase_vsb = ttk.Scrollbar(
+    weather_phase_table_frame, orient="vertical", command=weather_phase_tree.yview
+)
+weather_phase_tree.configure(yscrollcommand=weather_phase_vsb.set)
+
+weather_phase_tree.grid(row=0, column=0, sticky="nsew")
+weather_phase_vsb.grid(row=0, column=1, sticky="ns")
+
+weather_phase_table_frame.rowconfigure(0, weight=1)
+weather_phase_table_frame.columnconfigure(0, weight=1)
+
+weather_phase_plot_frame = ttk.Frame(weather_phase_section)
+weather_phase_plot_frame.pack(fill="both", expand=True, padx=5, pady=(0, 5))
+
+compound_weather_section = ttk.LabelFrame(
+    weather_advanced_section, text="Scelta compound vs condizioni pista"
+)
+compound_weather_section.grid(row=0, column=1, sticky="nsew", padx=(4, 0), pady=0)
+
+compound_weather_info_var = tk.StringVar(
+    value="Analizza come i compound performano rispetto alla track temperature."
+)
+ttk.Label(
+    compound_weather_section,
+    textvariable=compound_weather_info_var,
+    anchor="w",
+    wraplength=580,
+).pack(fill="x", padx=5, pady=(4, 2))
+
+compound_weather_buttons = ttk.Frame(compound_weather_section)
+compound_weather_buttons.pack(fill="x", padx=5, pady=(0, 4))
+
+ttk.Button(
+    compound_weather_buttons,
+    text="Analisi compound vs meteo",
+    command=on_compute_compound_weather_click,
+).pack(side="left")
+
+compound_weather_table_frame = ttk.Frame(compound_weather_section)
+compound_weather_table_frame.pack(fill="both", expand=True, padx=5, pady=(0, 4))
+
+compound_columns = ("compound", "track_temp", "avg_lap", "laps")
+compound_weather_tree = ttk.Treeview(
+    compound_weather_table_frame,
+    columns=compound_columns,
+    show="headings",
+    height=6,
+)
+compound_weather_tree.heading("compound", text="Compound")
+compound_weather_tree.heading("track_temp", text="Track temp media")
+compound_weather_tree.heading("avg_lap", text="Lap medio")
+compound_weather_tree.heading("laps", text="Giri")
+
+compound_weather_tree.column("compound", width=120, anchor="center")
+compound_weather_tree.column("track_temp", width=140, anchor="center")
+compound_weather_tree.column("avg_lap", width=130, anchor="center")
+compound_weather_tree.column("laps", width=70, anchor="center")
+
+compound_weather_vsb = ttk.Scrollbar(
+    compound_weather_table_frame,
+    orient="vertical",
+    command=compound_weather_tree.yview,
+)
+compound_weather_tree.configure(yscrollcommand=compound_weather_vsb.set)
+
+compound_weather_tree.grid(row=0, column=0, sticky="nsew")
+compound_weather_vsb.grid(row=0, column=1, sticky="ns")
+
+compound_weather_table_frame.rowconfigure(0, weight=1)
+compound_weather_table_frame.columnconfigure(0, weight=1)
+
+compound_weather_plot_frame = ttk.Frame(compound_weather_section)
+compound_weather_plot_frame.pack(fill="both", expand=True, padx=5, pady=(0, 5))
+
+weather_advanced_section.columnconfigure(0, weight=1)
+weather_advanced_section.columnconfigure(1, weight=1)
+weather_advanced_section.rowconfigure(0, weight=1)
 
 # --- Contenuto tab Statistiche piloti --- #
 stats_frame_inner = ttk.Frame(stats_tab_frame)
