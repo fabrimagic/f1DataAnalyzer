@@ -672,18 +672,21 @@ def update_battle_pressure_plot(driver_number):
     ax.scatter(plot_x, plot_y, c=colors, s=26, label="Interval")
 
     marker_styles = {
-        "Avvicinamento": {"color": "tab:green", "marker": "^"},
-        "Allontanamento": {"color": "tab:orange", "marker": "v"},
+        ("interval", "Avvicinamento"): {"color": "tab:green", "marker": "^"},
+        ("interval", "Allontanamento"): {"color": "tab:orange", "marker": "v"},
+        ("gap_to_leader", "Avvicinamento"): {"color": "tab:purple", "marker": "^"},
+        ("gap_to_leader", "Allontanamento"): {"color": "tab:blue", "marker": "v"},
     }
 
     for seg in segments:
         trend = seg.get("trend")
-        style = marker_styles.get(trend, {})
+        metric = seg.get("metric")
+        style = marker_styles.get((metric, trend), {})
         marker_x = seg.get("marker_x")
         marker_y = seg.get("marker_y")
         if marker_x is None or marker_y is None:
             continue
-        label_key = f"{trend} ({seg.get('metric')})"
+        label_key = f"{trend} ({metric})"
         label = None if label_key in labels_used else label_key
         labels_used.add(label_key)
         ax.scatter(
