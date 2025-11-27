@@ -3686,7 +3686,7 @@ def on_fetch_race_control_click():
 
 root = tk.Tk()
 root.title(
-    "F1 OpenF1 Tool: Calendario, Risultati, Distacchi, Gomme, Giri, Pit, Meteo, Statistiche & Strategia"
+    "Full Gas Podcast - F1 Analyzer"
 )
 root.geometry("1500x950")
 root.minsize(1280, 850)
