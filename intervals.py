@@ -1,11 +1,15 @@
+import os
+import subprocess
+import tempfile
+import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
 import urllib.request
 import urllib.error
 import json
 import math
-import webbrowser
 from datetime import datetime
+from shutil import which
 
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -43,6 +47,8 @@ race_control_tree = None
 race_control_info_var = None
 team_radio_tree = None
 team_radio_info_var = None
+team_radio_play_thread = None
+team_radio_play_process = None
 
 # Impostazioni per identificare scia/aria pulita e momenti chiave
 SLIPSTREAM_THRESHOLD = 1.0
@@ -103,6 +109,17 @@ def http_get_json(url: str):
         raise RuntimeError(f"Errore di rete: {e}")
     except json.JSONDecodeError:
         raise RuntimeError("Risposta JSON non valida dall'API.")
+
+
+def http_get_bytes(url: str):
+    """GET semplice che ritorna il contenuto binario o solleva RuntimeError."""
+    try:
+        with urllib.request.urlopen(url, timeout=20) as response:
+            if response.status != 200:
+                raise RuntimeError(f"HTTP {response.status} per URL: {url}")
+            return response.read()
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Errore di rete: {e}")
 
 
 def fetch_sessions(year: int):
@@ -260,6 +277,86 @@ def fetch_team_radio(session_key: int, driver_number):
     if not isinstance(messages, list):
         raise RuntimeError("Formato JSON inatteso per i team radio.")
     return messages
+
+
+def set_team_radio_status(message: str):
+    if team_radio_info_var is not None:
+        root.after(0, lambda m=message: team_radio_info_var.set(m))
+
+
+def stop_team_radio_playback():
+    """Termina un'eventuale riproduzione audio in corso."""
+    global team_radio_play_process
+    if team_radio_play_process is not None:
+        try:
+            if team_radio_play_process.poll() is None:
+                team_radio_play_process.terminate()
+        except Exception:
+            pass
+    team_radio_play_process = None
+
+
+def build_audio_player_command(audio_path: str):
+    """Restituisce il comando per riprodurre l'audio usando un player disponibile."""
+    candidate_players = [
+        ("ffplay", ["-nodisp", "-autoexit", "-loglevel", "quiet"]),
+        ("mpv", ["--no-video", "--really-quiet"]),
+        ("mpg123", []),
+        ("cvlc", ["--play-and-exit", "--intf", "dummy"]),
+        ("afplay", []),
+    ]
+
+    for exe, extra_args in candidate_players:
+        full_path = which(exe)
+        if full_path:
+            return [full_path, *extra_args, audio_path]
+    return None
+
+
+def play_team_radio_from_url(url: str):
+    """Scarica l'audio e lo riproduce senza aprire il browser."""
+    global team_radio_play_thread, team_radio_play_process
+
+    if not url:
+        messagebox.showinfo("Info", "Nessun URL disponibile per questo team radio.")
+        return
+
+    stop_team_radio_playback()
+
+    def worker():
+        tmp_path = None
+        try:
+            set_team_radio_status("Download audio del team radio in corso...")
+            audio_bytes = http_get_bytes(url)
+
+            suffix = os.path.splitext(url)[1] or ".bin"
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(audio_bytes)
+                tmp_path = tmp.name
+
+            cmd = build_audio_player_command(tmp_path)
+            if cmd is None:
+                raise RuntimeError(
+                    "Nessun lettore audio trovato (prova ad installare ffplay, mpv, mpg123 o vlc)."
+                )
+
+            set_team_radio_status("Riproduzione team radio in corso...")
+            team_radio_play_process = subprocess.Popen(cmd)
+            team_radio_play_process.wait()
+            set_team_radio_status("Riproduzione team radio completata.")
+        except Exception as e:
+            set_team_radio_status("Errore nella riproduzione del team radio.")
+            root.after(0, lambda: messagebox.showerror("Riproduzione team radio", str(e)))
+        finally:
+            stop_team_radio_playback()
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+
+    team_radio_play_thread = threading.Thread(target=worker, daemon=True)
+    team_radio_play_thread.start()
 
 
 # --------------------- Utility per la GUI --------------------- #
@@ -432,6 +529,7 @@ def clear_race_control_table():
 def clear_team_radio_table():
     """Svuota la tabella Team Radio e ripristina il messaggio di guida."""
     global team_radio_tree, team_radio_info_var
+    stop_team_radio_playback()
     if team_radio_tree is not None:
         for item in team_radio_tree.get_children():
             team_radio_tree.delete(item)
@@ -607,7 +705,7 @@ def update_team_radio_table(session_key: int, driver_number, driver_name: str):
 
 
 def on_play_team_radio_click(event=None):
-    """Riproduce l'audio del team radio selezionato aprendo l'URL nel browser di sistema."""
+    """Riproduce l'audio del team radio selezionato direttamente dall'interfaccia."""
     global team_radio_tree
 
     if team_radio_tree is None:
@@ -629,12 +727,7 @@ def on_play_team_radio_click(event=None):
         messagebox.showinfo("Info", "Nessun URL disponibile per questo team radio.")
         return
 
-    try:
-        webbrowser.open_new(url)
-    except Exception:
-        messagebox.showerror(
-            "Errore", "Impossibile aprire il browser per riprodurre il team radio."
-        )
+    play_team_radio_from_url(url)
 
 
 def on_fetch_team_radio_click():
@@ -2897,16 +2990,16 @@ team_radio_tree = ttk.Treeview(
     team_radio_tab_frame,
     columns=team_radio_columns,
     show="headings",
+    displaycolumns=("timestamp", "lap_number"),
     height=12,
 )
 
 team_radio_tree.heading("timestamp", text="Data / Ora (UTC)")
 team_radio_tree.heading("lap_number", text="Giro")
-team_radio_tree.heading("recording_url", text="URL registrazione")
 
 team_radio_tree.column("timestamp", width=170, anchor="center")
 team_radio_tree.column("lap_number", width=70, anchor="center")
-team_radio_tree.column("recording_url", width=520, anchor="w")
+team_radio_tree.column("recording_url", width=0, minwidth=0, stretch=False)
 
 team_radio_vsb = ttk.Scrollbar(
     team_radio_tab_frame, orient="vertical", command=team_radio_tree.yview
