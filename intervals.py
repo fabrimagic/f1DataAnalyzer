@@ -4,6 +4,7 @@ import urllib.request
 import urllib.error
 import json
 import math
+import base64
 from datetime import datetime
 
 from matplotlib.figure import Figure
@@ -13,6 +14,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 API_SESSIONS_URL = "https://api.openf1.org/v1/sessions?year="
 API_RESULTS_URL = "https://api.openf1.org/v1/session_result?session_key="
 API_DRIVERS_URL = "https://api.openf1.org/v1/drivers?driver_number={driver_number}&session_key={session_key}"
+API_DRIVER_INFO_URL = "https://api.openf1.org/v1/drivers?driver_number={driver_number}"
 API_INTERVALS_URL = "https://api.openf1.org/v1/intervals?session_key={session_key}&driver_number={driver_number}"
 API_STINTS_URL = "https://api.openf1.org/v1/stints?session_key={session_key}&driver_number={driver_number}"
 API_LAPS_URL = "https://api.openf1.org/v1/laps?session_key={session_key}&driver_number={driver_number}"
@@ -22,6 +24,8 @@ API_RACE_CONTROL_URL = "https://api.openf1.org/v1/race_control?session_key={sess
 
 # Cache per i nomi dei piloti: chiave = (session_key, driver_number)
 DRIVER_CACHE = {}
+DRIVER_HEADSHOT_URL_CACHE = {}
+DRIVER_IMAGE_CACHE = {}
 
 # Canvas matplotlib per i grafici (uno per tab)
 gap_plot_canvas = None
@@ -116,6 +120,11 @@ def fetch_session_results(session_key: int):
     return results
 
 
+def cache_driver_headshot_url(dn_key: int, headshot_url: str):
+    if isinstance(dn_key, int) and isinstance(headshot_url, str) and headshot_url:
+        DRIVER_HEADSHOT_URL_CACHE[dn_key] = headshot_url
+
+
 def fetch_driver_full_name(driver_number, session_key: int):
     """Ritorna il full_name del pilota per (driver_number, session_key)."""
     try:
@@ -144,8 +153,92 @@ def fetch_driver_full_name(driver_number, session_key: int):
     if not isinstance(full_name, str):
         full_name = ""
 
+    headshot_url = (
+        first.get("headshot_url")
+        or first.get("headshot")
+        or first.get("headshot_image")
+        or ""
+    )
+    cache_driver_headshot_url(dn_key, headshot_url)
+
     DRIVER_CACHE[cache_key] = full_name
     return full_name
+
+
+def create_driver_thumbnail(img_bytes: bytes, max_size: int = 48):
+    try:
+        encoded = base64.b64encode(img_bytes)
+        base_image = tk.PhotoImage(data=encoded)
+    except Exception:
+        return None
+
+    thumbnail = base_image
+    if base_image.width() and base_image.height():
+        ratio = max(base_image.width(), base_image.height()) / float(max_size)
+        if ratio > 1:
+            factor = math.ceil(ratio)
+            try:
+                thumbnail = base_image.subsample(factor, factor)
+            except Exception:
+                thumbnail = base_image
+
+    return {"image": thumbnail, "base": base_image}
+
+
+def fetch_driver_photo(driver_number):
+    """Recupera la foto del pilota (thumbnail) usando driver_number."""
+    try:
+        dn_key = int(driver_number)
+    except (ValueError, TypeError):
+        return None
+
+    if dn_key in DRIVER_IMAGE_CACHE:
+        cached = DRIVER_IMAGE_CACHE.get(dn_key, {})
+        return cached.get("image")
+
+    headshot_url = DRIVER_HEADSHOT_URL_CACHE.get(dn_key, "")
+
+    if not headshot_url:
+        url = API_DRIVER_INFO_URL.format(driver_number=dn_key)
+        try:
+            data = http_get_json(url)
+        except RuntimeError:
+            DRIVER_IMAGE_CACHE[dn_key] = {"image": None, "base": None}
+            return None
+
+        if not isinstance(data, list) or not data:
+            DRIVER_IMAGE_CACHE[dn_key] = {"image": None, "base": None}
+            return None
+
+        first = data[0]
+        headshot_url = (
+            first.get("headshot_url")
+            or first.get("headshot")
+            or first.get("headshot_image")
+            or ""
+        )
+        cache_driver_headshot_url(dn_key, headshot_url)
+
+    if not headshot_url:
+        DRIVER_IMAGE_CACHE[dn_key] = {"image": None, "base": None}
+        return None
+
+    try:
+        with urllib.request.urlopen(headshot_url, timeout=15) as response:
+            if response.status != 200:
+                raise RuntimeError("Impossibile scaricare la foto del pilota.")
+            img_bytes = response.read()
+    except Exception:
+        DRIVER_IMAGE_CACHE[dn_key] = {"image": None, "base": None}
+        return None
+
+    thumb_data = create_driver_thumbnail(img_bytes)
+    DRIVER_IMAGE_CACHE[dn_key] = thumb_data if thumb_data is not None else {"image": None, "base": None}
+
+    if thumb_data is None:
+        return None
+
+    return thumb_data.get("image")
 
 
 def fetch_intervals(session_key: int, driver_number):
@@ -1061,6 +1154,8 @@ def on_compute_session_stats_click():
         else:
             gap_best_str = ""
 
+        photo = fetch_driver_photo(s.get("driver_number"))
+
         stats_tree.insert(
             "",
             tk.END,
@@ -1074,6 +1169,7 @@ def on_compute_session_stats_click():
                 best_str,
                 gap_best_str,
             ),
+            image=photo or "",
         )
 
     plots_notebook.select(stats_tab_frame)
@@ -1571,6 +1667,7 @@ def on_compute_pit_strategy_click():
         if not name:
             name = fetch_driver_full_name(dnum, session_key)
             info["name"] = name
+        photo = fetch_driver_photo(dnum)
 
         laps_str = ", ".join(str(l) for l in sorted(laps_list))
 
@@ -1585,6 +1682,7 @@ def on_compute_pit_strategy_click():
                 f"{worst_pit:.3f}",
                 laps_str,
             ),
+            image=photo or "",
         )
 
     # Grafico pit stop per giro
@@ -1774,6 +1872,7 @@ def on_fetch_results_click(event=None):
             duration_str = ""
 
         full_name = fetch_driver_full_name(driver_number, session_key)
+        photo = fetch_driver_photo(driver_number)
 
         results_tree.insert(
             "",
@@ -1788,6 +1887,7 @@ def on_fetch_results_click(event=None):
                 gap,
                 duration_str,
             ),
+            image=photo or "",
         )
 
     if is_race_like(session_type):
@@ -1820,6 +1920,7 @@ def on_fetch_results_click(event=None):
             for p in pit_sorted:
                 dnum = p.get("driver_number", "")
                 full_name = fetch_driver_full_name(dnum, session_key)
+                photo = fetch_driver_photo(dnum)
 
                 lap_number = p.get("lap_number", "")
                 pit_duration = p.get("pit_duration", "")
@@ -1832,6 +1933,7 @@ def on_fetch_results_click(event=None):
                     "",
                     tk.END,
                     values=(full_name, lap_number, pit_duration_str),
+                    image=photo or "",
                 )
 
             status_var.set(
@@ -2383,10 +2485,11 @@ results_columns = (
 results_tree = ttk.Treeview(
     results_frame,
     columns=results_columns,
-    show="headings",
+    show="tree headings",
     height=8,
 )
 
+results_tree.heading("#0", text="Foto")
 results_tree.heading("position", text="Pos.")
 results_tree.heading("driver_number", text="N°")
 results_tree.heading("driver_name", text="Pilota")
@@ -2404,6 +2507,7 @@ results_tree.column("points", width=70, anchor="center")
 results_tree.column("status", width=130, anchor="w")
 results_tree.column("gap", width=110, anchor="center")
 results_tree.column("duration", width=130, anchor="center")
+results_tree.column("#0", width=60, anchor="center", stretch=False)
 
 results_vsb = ttk.Scrollbar(
     results_frame,
@@ -2507,14 +2611,16 @@ pits_columns = (
 pits_tree = ttk.Treeview(
     pits_table_frame,
     columns=pits_columns,
-    show="headings",
+    show="tree headings",
     height=6,
 )
 
+pits_tree.heading("#0", text="Foto")
 pits_tree.heading("pit_driver_name", text="Pilota")
 pits_tree.heading("pit_lap_number", text="Giro")
 pits_tree.heading("pit_duration", text="Pit Time (s)")
 
+pits_tree.column("#0", width=60, anchor="center", stretch=False)
 pits_tree.column("pit_driver_name", width=170, anchor="w")
 pits_tree.column("pit_lap_number", width=70, anchor="center")
 pits_tree.column("pit_duration", width=90, anchor="center")
@@ -2872,10 +2978,11 @@ stats_columns = (
 stats_tree = ttk.Treeview(
     stats_frame_inner,
     columns=stats_columns,
-    show="headings",
+    show="tree headings",
     height=8
 )
 
+stats_tree.heading("#0", text="Foto")
 stats_tree.heading("position", text="Pos.")
 stats_tree.heading("driver_number", text="N°")
 stats_tree.heading("driver_name", text="Pilota")
@@ -2893,6 +3000,7 @@ stats_tree.column("avg_lap", width=110, anchor="center")
 stats_tree.column("std_lap", width=110, anchor="center")
 stats_tree.column("best_lap", width=110, anchor="center")
 stats_tree.column("gap_best", width=150, anchor="center")
+stats_tree.column("#0", width=60, anchor="center", stretch=False)
 
 stats_vsb = ttk.Scrollbar(
     stats_frame_inner,
@@ -2930,10 +3038,11 @@ pit_stats_columns = (
 pit_stats_tree = ttk.Treeview(
     pit_stats_frame,
     columns=pit_stats_columns,
-    show="headings",
+    show="tree headings",
     height=6
 )
 
+pit_stats_tree.heading("#0", text="Foto")
 pit_stats_tree.heading("driver_name", text="Pilota")
 pit_stats_tree.heading("num_pits", text="# Pit")
 pit_stats_tree.heading("avg_pit", text="Pit medio (s)")
@@ -2941,6 +3050,7 @@ pit_stats_tree.heading("best_pit", text="Miglior pit (s)")
 pit_stats_tree.heading("worst_pit", text="Peggior pit (s)")
 pit_stats_tree.heading("pit_laps", text="Giri pit")
 
+pit_stats_tree.column("#0", width=60, anchor="center", stretch=False)
 pit_stats_tree.column("driver_name", width=180, anchor="w")
 pit_stats_tree.column("num_pits", width=60, anchor="center")
 pit_stats_tree.column("avg_pit", width=100, anchor="center")
