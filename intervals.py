@@ -12,7 +12,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 # --- Endpoint API --- #
 API_SESSIONS_URL = "https://api.openf1.org/v1/sessions?year="
 API_RESULTS_URL = "https://api.openf1.org/v1/session_result?session_key="
-API_DRIVER_INFO_URL = "https://api.openf1.org/v1/drivers?driver_number={driver_number}"
+API_DRIVER_INFO_URL = "https://api.openf1.org/v1/drivers?session_key={session_key}&driver_number={driver_number}"
 API_INTERVALS_URL = "https://api.openf1.org/v1/intervals?session_key={session_key}&driver_number={driver_number}"
 API_STINTS_URL = "https://api.openf1.org/v1/stints?session_key={session_key}&driver_number={driver_number}"
 API_LAPS_URL = "https://api.openf1.org/v1/laps?session_key={session_key}&driver_number={driver_number}"
@@ -121,38 +121,41 @@ def fetch_driver_full_name(driver_number, session_key: int):
     """Ritorna il full_name del pilota per (driver_number, session_key)."""
     try:
         dn_key = int(driver_number)
+        skey = int(session_key)
     except (ValueError, TypeError):
         return ""
 
-    cache_key = (session_key, dn_key)
+    cache_key = (skey, dn_key)
     if cache_key in DRIVER_CACHE:
         return DRIVER_CACHE[cache_key]
 
-    profile = fetch_driver_profile(dn_key)
+    profile = fetch_driver_profile(dn_key, skey)
     DRIVER_CACHE[cache_key] = profile.get("full_name", "")
     return DRIVER_CACHE[cache_key]
 
 
-def fetch_driver_profile(driver_number):
+def fetch_driver_profile(driver_number, session_key):
     """Ritorna un dizionario con full_name e team_name per driver_number."""
     try:
         dn_key = int(driver_number)
+        skey = int(session_key)
     except (ValueError, TypeError):
         return {"full_name": "", "team_name": ""}
 
-    if dn_key in DRIVER_PROFILE_CACHE:
-        return DRIVER_PROFILE_CACHE[dn_key]
+    cache_key = (skey, dn_key)
+    if cache_key in DRIVER_PROFILE_CACHE:
+        return DRIVER_PROFILE_CACHE[cache_key]
 
-    url = API_DRIVER_INFO_URL.format(driver_number=dn_key)
+    url = API_DRIVER_INFO_URL.format(session_key=skey, driver_number=dn_key)
     try:
         data = http_get_json(url)
     except RuntimeError:
-        DRIVER_PROFILE_CACHE[dn_key] = {"full_name": "", "team_name": ""}
-        return DRIVER_PROFILE_CACHE[dn_key]
+        DRIVER_PROFILE_CACHE[cache_key] = {"full_name": "", "team_name": ""}
+        return DRIVER_PROFILE_CACHE[cache_key]
 
     if not isinstance(data, list) or not data:
-        DRIVER_PROFILE_CACHE[dn_key] = {"full_name": "", "team_name": ""}
-        return DRIVER_PROFILE_CACHE[dn_key]
+        DRIVER_PROFILE_CACHE[cache_key] = {"full_name": "", "team_name": ""}
+        return DRIVER_PROFILE_CACHE[cache_key]
 
     first = data[0]
     full_name = first.get("full_name", "")
@@ -163,12 +166,12 @@ def fetch_driver_profile(driver_number):
     if not isinstance(team_name, str):
         team_name = ""
 
-    DRIVER_PROFILE_CACHE[dn_key] = {"full_name": full_name, "team_name": team_name}
-    return DRIVER_PROFILE_CACHE[dn_key]
+    DRIVER_PROFILE_CACHE[cache_key] = {"full_name": full_name, "team_name": team_name}
+    return DRIVER_PROFILE_CACHE[cache_key]
 
 
-def fetch_driver_team_name(driver_number):
-    profile = fetch_driver_profile(driver_number)
+def fetch_driver_team_name(driver_number, session_key):
+    profile = fetch_driver_profile(driver_number, session_key)
     return profile.get("team_name", "")
 
 
@@ -1601,7 +1604,7 @@ def on_compute_pit_strategy_click():
             info["name"] = name
         team_name = info.get("team_name", "")
         if not team_name:
-            team_name = fetch_driver_team_name(dnum)
+            team_name = fetch_driver_team_name(dnum, session_key)
             info["team_name"] = team_name
 
         laps_str = ", ".join(str(l) for l in sorted(laps_list))
@@ -1809,7 +1812,7 @@ def on_fetch_results_click(event=None):
             duration_str = ""
 
         full_name = fetch_driver_full_name(driver_number, session_key)
-        team_name = fetch_driver_team_name(driver_number)
+        team_name = fetch_driver_team_name(driver_number, session_key)
 
         results_tree.insert(
             "",
@@ -1857,7 +1860,7 @@ def on_fetch_results_click(event=None):
             for p in pit_sorted:
                 dnum = p.get("driver_number", "")
                 full_name = fetch_driver_full_name(dnum, session_key)
-                team_name = fetch_driver_team_name(dnum)
+                team_name = fetch_driver_team_name(dnum, session_key)
 
                 lap_number = p.get("lap_number", "")
                 pit_duration = p.get("pit_duration", "")
