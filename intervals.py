@@ -1729,8 +1729,9 @@ def on_fetch_sessions_click():
 
 def on_fetch_results_click(event=None):
     """Carica risultati, pit stop (se Race/Sprint) e meteo sessione."""
-    global DRIVER_CACHE, current_pit_data, current_results_data
+    global DRIVER_CACHE, DRIVER_PROFILE_CACHE, current_pit_data, current_results_data
     DRIVER_CACHE = {}
+    DRIVER_PROFILE_CACHE = {}
     clear_driver_plots()
     clear_weather_plot()
     clear_stats_table()
