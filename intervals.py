@@ -94,6 +94,10 @@ pit_strategy_canvas = None
 pit_strategy_fig = None
 pit_strategy_plot_frame = None
 pit_undercut_tree = None
+pit_window_tree = None
+pit_window_canvas = None
+pit_window_fig = None
+pit_window_plot_frame = None
 
 
 # --------------------- Funzioni per le API --------------------- #
@@ -733,6 +737,7 @@ def clear_stints_summary_table():
 def clear_pit_strategy():
     """Svuota tabella e grafico di 'Pit stop & strategia'."""
     global pit_stats_tree, pit_strategy_canvas, pit_strategy_fig, pit_undercut_tree
+    global pit_window_tree, pit_window_canvas, pit_window_fig
 
     if pit_stats_tree is not None:
         for item in pit_stats_tree.get_children():
@@ -747,6 +752,16 @@ def clear_pit_strategy():
         pit_strategy_canvas = None
 
     pit_strategy_fig = None
+
+    if pit_window_tree is not None:
+        for item in pit_window_tree.get_children():
+            pit_window_tree.delete(item)
+
+    if pit_window_canvas is not None:
+        pit_window_canvas.get_tk_widget().destroy()
+        pit_window_canvas = None
+
+    pit_window_fig = None
 
 
 # --------------------- Gestione click sul grafico distacchi --------------------- #
@@ -1915,6 +1930,256 @@ def update_pit_undercut_table(events):
         )
 
 
+def compute_pit_window_analysis(session_key, results_data, pit_data):
+    """Calcola pit window e posizione virtuale dopo un pit per ogni pilota/giro."""
+
+    def build_cumulative_times(laps_list):
+        """Restituisce lista ordinata (lap, cumulative_time)."""
+        try:
+            ordered = sorted(
+                [
+                    (l.get("lap_number"), l.get("lap_duration"))
+                    for l in laps_list
+                    if isinstance(l.get("lap_number"), int)
+                ],
+                key=lambda x: x[0],
+            )
+        except Exception:
+            ordered = []
+
+        cumulative = []
+        total = 0.0
+        for lap_num, lap_dur in ordered:
+            if not isinstance(lap_dur, (int, float)):
+                continue
+            total += float(lap_dur)
+            cumulative.append((lap_num, total))
+        return cumulative
+
+    def time_at_or_before(cum_list, lap):
+        last_time = None
+        for ln, t in cum_list:
+            if ln > lap:
+                break
+            last_time = t
+        return last_time
+
+    if not results_data:
+        return [], None, set()
+
+    # Stima tempo perso al pit
+    pit_durations = [
+        float(p.get("pit_duration"))
+        for p in pit_data
+        if isinstance(p.get("pit_duration"), (int, float))
+    ]
+    pit_loss_estimate = sum(pit_durations) / len(pit_durations) if pit_durations else 20.0
+
+    # Dati per ogni pilota
+    drivers = []
+    for r in results_data:
+        dnum = r.get("driver_number")
+        if isinstance(dnum, int):
+            drivers.append(dnum)
+        else:
+            try:
+                drivers.append(int(dnum))
+            except (ValueError, TypeError):
+                continue
+
+    laps_by_driver = {}
+    for dnum in drivers:
+        try:
+            laps = fetch_laps(session_key, dnum)
+        except RuntimeError:
+            laps = []
+        cumulative = build_cumulative_times(laps)
+        if cumulative:
+            laps_by_driver[dnum] = cumulative
+
+    if not laps_by_driver:
+        return [], pit_loss_estimate, set()
+
+    # Identifica giri con SC/VSC
+    sc_vsc_laps = set()
+    try:
+        rc_messages = fetch_race_control_messages(session_key)
+    except RuntimeError:
+        rc_messages = []
+
+    for msg in rc_messages:
+        flag_val = str(msg.get("flag", "")).lower()
+        text_val = str(msg.get("message", "")).lower()
+        if any(term in flag_val or term in text_val for term in ["vsc", "virtual safety", "sc", "safety car"]):
+            lap_num = msg.get("lap_number")
+            if isinstance(lap_num, int):
+                sc_vsc_laps.add(lap_num)
+
+    entries = []
+
+    for dnum, cumulative in laps_by_driver.items():
+        driver_name = fetch_driver_full_name(dnum, session_key)
+
+        for lap_num, cum_time in cumulative:
+            # Posizione reale stimata al lap
+            current_pos = 1
+            opponent_times = []
+            for other_num, other_cum in laps_by_driver.items():
+                if other_num == dnum:
+                    continue
+                other_time = time_at_or_before(other_cum, lap_num)
+                opponent_times.append(other_time)
+                if other_time is not None and other_time <= cum_time:
+                    current_pos += 1
+
+            predicted_time = cum_time + pit_loss_estimate
+            virtual_pos = 1
+            for other_time in opponent_times:
+                if other_time is not None and other_time <= predicted_time:
+                    virtual_pos += 1
+
+            gaps_ahead = [
+                other_time - predicted_time
+                for other_time in opponent_times
+                if other_time is not None and other_time > predicted_time
+            ]
+            gap_relevant = min(gaps_ahead) if gaps_ahead else None
+
+            delta_pos = virtual_pos - current_pos
+            if gap_relevant is not None and gap_relevant >= 1.5:
+                comment = "Safe window"
+                comment_tag = "safe"
+            elif gap_relevant is not None and gap_relevant >= 0.5:
+                comment = "Rischio traffico"
+                comment_tag = "risky"
+            else:
+                comment = "Traffico elevato"
+                comment_tag = "traffic"
+
+            if delta_pos > 0:
+                comment += f" (perderebbe {delta_pos} posizioni)"
+            elif delta_pos < 0:
+                comment += f" (guadagno stimato {abs(delta_pos)} posizioni)"
+
+            if lap_num in sc_vsc_laps:
+                comment += " | Possibile SC/VSC"
+
+            entries.append(
+                {
+                    "driver_number": dnum,
+                    "driver_name": driver_name,
+                    "lap": lap_num,
+                    "virtual_position": virtual_pos,
+                    "gap_relevant": gap_relevant,
+                    "pit_loss": pit_loss_estimate,
+                    "comment": comment,
+                    "comment_tag": comment_tag,
+                }
+            )
+
+    return entries, pit_loss_estimate, sc_vsc_laps
+
+
+def update_pit_window_table(entries):
+    """Aggiorna la tabella della pit window nella sezione strategia."""
+    global pit_window_tree
+
+    if pit_window_tree is None:
+        return
+
+    for item in pit_window_tree.get_children():
+        pit_window_tree.delete(item)
+
+    for e in entries:
+        gap_val = e.get("gap_relevant")
+        if isinstance(gap_val, (int, float)):
+            gap_str = f"{gap_val:+.2f}"
+        else:
+            gap_str = "--"
+
+        pit_window_tree.insert(
+            "",
+            tk.END,
+            values=(
+                e.get("driver_name", ""),
+                e.get("lap", ""),
+                e.get("virtual_position", ""),
+                gap_str,
+                f"{e.get('pit_loss', 0):.2f}",
+                e.get("comment", ""),
+            ),
+        )
+
+
+def update_pit_window_plot(entries, sc_vsc_laps):
+    """Disegna il grafico di posizione virtuale per pit window."""
+    global pit_window_canvas, pit_window_fig
+
+    if pit_window_canvas is not None:
+        pit_window_canvas.get_tk_widget().destroy()
+        pit_window_canvas = None
+
+    pit_window_fig = None
+
+    if not entries:
+        return
+
+    grouped = {}
+    for e in entries:
+        grouped.setdefault(e.get("driver_name", ""), []).append(e)
+
+    fig = Figure(figsize=(6, 3.2))
+    ax = fig.add_subplot(111)
+
+    for driver_name, data in grouped.items():
+        try:
+            ordered = sorted(data, key=lambda x: x.get("lap", 0))
+        except Exception:
+            ordered = data
+
+        valid_points = [
+            (
+                d.get("lap"),
+                d.get("virtual_position"),
+                d.get("comment_tag"),
+            )
+            for d in ordered
+            if isinstance(d.get("lap"), int) and isinstance(d.get("virtual_position"), int)
+        ]
+
+        if valid_points:
+            laps, positions, _tags = zip(*valid_points)
+            ax.plot(laps, positions, label=driver_name, linewidth=1.3)
+
+            safe_laps = [l for l, _, t in valid_points if t == "safe"]
+            safe_pos = [p for (l, p, t) in valid_points if t == "safe"]
+            risky_laps = [l for l, _, t in valid_points if t != "safe"]
+            risky_pos = [p for (l, p, t) in valid_points if t != "safe"]
+
+            if safe_laps and safe_pos:
+                ax.scatter(safe_laps, safe_pos, color="green", s=18, marker="o", alpha=0.8)
+            if risky_laps and risky_pos:
+                ax.scatter(risky_laps, risky_pos, color="orange", s=14, marker="x", alpha=0.7)
+
+    for lap in sc_vsc_laps:
+        ax.axvspan(lap - 0.5, lap + 0.5, color="yellow", alpha=0.15)
+
+    ax.set_xlabel("Giro")
+    ax.set_ylabel("Posizione virtuale dopo pit")
+    ax.set_title("Pit window & posizione virtuale")
+    ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.6)
+    ax.invert_yaxis()
+    if grouped:
+        ax.legend(fontsize=8, ncol=2)
+
+    pit_window_fig = fig
+
+    pit_window_canvas_local = FigureCanvasTkAgg(fig, master=pit_window_plot_frame)
+    pit_window_canvas_local.get_tk_widget().pack(fill="both", expand=True)
+    pit_window_canvas_local.draw()
+
+    pit_window_canvas = pit_window_canvas_local
+
 def on_compute_undercut_analysis_click():
     """Callback per il bottone di analisi undercut/overcut."""
     session_key, session_type, _ = get_selected_session_info()
@@ -2109,6 +2374,56 @@ def on_compute_pit_strategy_click():
         "Analisi pit stop aggiornata: tabella riassuntiva per pilota e grafico pit stop per giro "
         "disponibili nella tab 'Pit stop & strategia'."
     )
+
+
+def on_compute_pit_window_click():
+    """Callback per calcolare pit window e posizione virtuale dopo pit."""
+    global current_pit_data, current_results_data
+
+    session_key, session_type, _ = get_selected_session_info()
+    if session_key is None:
+        messagebox.showinfo("Info", "Seleziona prima una sessione.")
+        return
+
+    if not is_race_like(session_type):
+        messagebox.showinfo(
+            "Info",
+            "L'analisi pit window è disponibile solo per sessioni Race o Sprint.",
+        )
+        return
+
+    if not current_results_data:
+        messagebox.showinfo(
+            "Info", "Prima carica i risultati della sessione con il relativo bottone."
+        )
+        return
+
+    status_var.set("Calcolo pit window e posizione virtuale in corso...")
+    root.update_idletasks()
+
+    try:
+        entries, pit_loss, sc_vsc_laps = compute_pit_window_analysis(
+            session_key, current_results_data, current_pit_data
+        )
+    except Exception as e:
+        status_var.set("Errore durante il calcolo della pit window.")
+        messagebox.showerror("Pit window", str(e))
+        return
+
+    update_pit_window_table(entries)
+    update_pit_window_plot(entries, sc_vsc_laps)
+
+    plots_notebook.select(pit_strategy_tab_frame)
+
+    if not entries:
+        status_var.set(
+            "Nessuna stima disponibile: dati giri o pit insufficienti per calcolare la pit window."
+        )
+    else:
+        pit_loss_str = f"{pit_loss:.2f}s" if pit_loss is not None else "--"
+        status_var.set(
+            f"Pit window calcolata (pit loss stimato {pit_loss_str}). Controlla tabella e grafico nella tab 'Pit stop & strategia'."
+        )
 
 
 # --------------------- Callback GUI principali --------------------- #
@@ -2767,21 +3082,28 @@ pit_undercut_button = ttk.Button(
 )
 pit_undercut_button.grid(row=0, column=4, padx=4, pady=2, sticky="ew")
 
+pit_window_button = ttk.Button(
+    actions_frame,
+    text="Pit window & virtual position",
+    command=on_compute_pit_window_click,
+)
+pit_window_button.grid(row=0, column=5, padx=4, pady=2, sticky="ew")
+
 race_control_action = ttk.Button(
     actions_frame,
     text="Race Control pilota",
     command=on_fetch_race_control_click,
 )
-race_control_action.grid(row=0, column=5, padx=4, pady=2, sticky="ew")
+race_control_action.grid(row=0, column=6, padx=4, pady=2, sticky="ew")
 
 team_radio_button = ttk.Button(
     actions_frame,
     text="Team radio pilota",
     command=on_fetch_team_radio_click,
 )
-team_radio_button.grid(row=0, column=6, padx=4, pady=2, sticky="ew")
+team_radio_button.grid(row=0, column=7, padx=4, pady=2, sticky="ew")
 
-actions_frame.columnconfigure((0, 1, 2, 3, 4, 5, 6), weight=1)
+actions_frame.columnconfigure((0, 1, 2, 3, 4, 5, 6, 7), weight=1)
 
 # --- Layout principale con paned window per mostrare tutte le sezioni --- #
 main_paned = ttk.Panedwindow(root, orient=tk.VERTICAL)
@@ -3588,12 +3910,73 @@ pit_undercut_frame.columnconfigure(0, weight=1)
 
 ttk.Label(
     pit_strategy_tab_frame,
+    text="Pit window & posizione virtuale dopo pit:",
+    font=("", 9, "bold"),
+).pack(anchor="w", padx=5, pady=(4, 0))
+
+pit_window_frame = ttk.Frame(pit_strategy_tab_frame)
+pit_window_frame.pack(fill="x", expand=False, padx=5, pady=(0, 4))
+
+pit_window_columns = (
+    "driver_name",
+    "lap",
+    "virtual_position",
+    "gap",
+    "pit_loss",
+    "comment",
+)
+
+pit_window_tree = ttk.Treeview(
+    pit_window_frame,
+    columns=pit_window_columns,
+    show="headings",
+    height=6,
+)
+
+pit_window_tree.heading("driver_name", text="Pilota")
+pit_window_tree.heading("lap", text="Giro")
+pit_window_tree.heading("virtual_position", text="Posizione virtuale")
+pit_window_tree.heading("gap", text="Gap rilevante (s)")
+pit_window_tree.heading("pit_loss", text="Pit loss stimato (s)")
+pit_window_tree.heading("comment", text="Commento")
+
+pit_window_tree.column("driver_name", width=170, anchor="w")
+pit_window_tree.column("lap", width=60, anchor="center")
+pit_window_tree.column("virtual_position", width=120, anchor="center")
+pit_window_tree.column("gap", width=120, anchor="center")
+pit_window_tree.column("pit_loss", width=130, anchor="center")
+pit_window_tree.column("comment", width=400, anchor="w")
+
+pit_window_vsb = ttk.Scrollbar(
+    pit_window_frame,
+    orient="vertical",
+    command=pit_window_tree.yview,
+)
+pit_window_tree.configure(yscrollcommand=pit_window_vsb.set)
+
+pit_window_tree.grid(row=0, column=0, sticky="nsew")
+pit_window_vsb.grid(row=0, column=1, sticky="ns")
+
+pit_window_frame.rowconfigure(0, weight=1)
+pit_window_frame.columnconfigure(0, weight=1)
+
+ttk.Label(
+    pit_strategy_tab_frame,
     text="Distribuzione pit stop per giro:",
     font=("", 9, "bold")
 ).pack(anchor="w", padx=5, pady=(0, 2))
 
 pit_strategy_plot_frame = ttk.Frame(pit_strategy_tab_frame, style="Card.TFrame")
 pit_strategy_plot_frame.pack(fill="both", expand=True, padx=5, pady=(0, 5))
+
+ttk.Label(
+    pit_strategy_tab_frame,
+    text="Posizione virtuale dopo pit (grafico):",
+    font=("", 9, "bold"),
+).pack(anchor="w", padx=5, pady=(0, 2))
+
+pit_window_plot_frame = ttk.Frame(pit_strategy_tab_frame, style="Card.TFrame")
+pit_window_plot_frame.pack(fill="both", expand=True, padx=5, pady=(0, 5))
 
 # --- Label info click distacchi --- #
 gap_point_info_var = tk.StringVar(
