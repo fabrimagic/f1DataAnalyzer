@@ -122,20 +122,30 @@ def http_get_bytes(url: str):
         raise RuntimeError(f"Errore di rete: {e}")
 
 
+def fetch_list_from_api(url: str, error_context: str):
+    """Esegue una GET e verifica che la risposta sia una lista."""
+    data = http_get_json(url)
+    if not isinstance(data, list):
+        raise RuntimeError(f"Formato JSON inatteso {error_context}.")
+    return data
+
+
+def parse_driver_number(driver_number, error_context: str):
+    """Converte il driver_number in intero o solleva RuntimeError con contesto."""
+    try:
+        return int(driver_number)
+    except (ValueError, TypeError):
+        raise RuntimeError(f"driver_number non valido per la chiamata {error_context}.")
+
+
 def fetch_sessions(year: int):
     url = f"{API_SESSIONS_URL}{year}"
-    sessions = http_get_json(url)
-    if not isinstance(sessions, list):
-        raise RuntimeError("Formato JSON inatteso per le sessioni.")
-    return sessions
+    return fetch_list_from_api(url, "per le sessioni")
 
 
 def fetch_session_results(session_key: int):
     url = f"{API_RESULTS_URL}{session_key}"
-    results = http_get_json(url)
-    if not isinstance(results, list):
-        raise RuntimeError("Formato JSON inatteso per i risultati di sessione.")
-    return results
+    return fetch_list_from_api(url, "per i risultati di sessione")
 
 
 def fetch_driver_full_name(driver_number, session_key: int):
@@ -198,85 +208,52 @@ def fetch_driver_team_name(driver_number, session_key):
 
 def fetch_intervals(session_key: int, driver_number):
     """Dati di distacco (gap_to_leader, interval) per pilota."""
-    try:
-        dn_key = int(driver_number)
-    except (ValueError, TypeError):
-        raise RuntimeError("driver_number non valido per la chiamata intervals.")
+    dn_key = parse_driver_number(driver_number, "intervals")
 
     url = API_INTERVALS_URL.format(session_key=session_key, driver_number=dn_key)
-    intervals = http_get_json(url)
-    if not isinstance(intervals, list):
-        raise RuntimeError("Formato JSON inatteso per i dati intervals.")
-    return intervals
+    return fetch_list_from_api(url, "per i dati intervals")
 
 
 def fetch_stints(session_key: int, driver_number):
     """Stint gomme per pilota nella sessione."""
-    try:
-        dn_key = int(driver_number)
-    except (ValueError, TypeError):
-        raise RuntimeError("driver_number non valido per la chiamata stints.")
+    dn_key = parse_driver_number(driver_number, "stints")
 
     url = API_STINTS_URL.format(session_key=session_key, driver_number=dn_key)
-    stints = http_get_json(url)
-    if not isinstance(stints, list):
-        raise RuntimeError("Formato JSON inatteso per i dati stints.")
-    return stints
+    return fetch_list_from_api(url, "per i dati stints")
 
 
 def fetch_laps(session_key: int, driver_number):
     """Dati dei giri per pilota nella sessione."""
-    try:
-        dn_key = int(driver_number)
-    except (ValueError, TypeError):
-        raise RuntimeError("driver_number non valido per la chiamata laps.")
+    dn_key = parse_driver_number(driver_number, "laps")
 
     url = API_LAPS_URL.format(session_key=session_key, driver_number=dn_key)
-    laps = http_get_json(url)
-    if not isinstance(laps, list):
-        raise RuntimeError("Formato JSON inatteso per i dati laps.")
-    return laps
+    return fetch_list_from_api(url, "per i dati laps")
 
 
 def fetch_pit_stops(session_key: int):
     """Elenco pit stop per la sessione (tutti i piloti)."""
     url = API_PIT_URL.format(session_key=session_key)
-    pits = http_get_json(url)
-    if not isinstance(pits, list):
-        raise RuntimeError("Formato JSON inatteso per i dati pit.")
-    return pits
+    return fetch_list_from_api(url, "per i dati pit")
 
 
 def fetch_weather(session_key: int):
     """Dati meteo per la singola sessione (session_key)."""
     url = API_WEATHER_URL.format(session_key=session_key)
-    weather = http_get_json(url)
-    if not isinstance(weather, list):
-        raise RuntimeError("Formato JSON inatteso per i dati weather.")
-    return weather
+    return fetch_list_from_api(url, "per i dati weather")
 
 
 def fetch_race_control_messages(session_key: int):
     """Messaggi Race Control per l'intera sessione."""
     url = API_RACE_CONTROL_URL.format(session_key=session_key)
-    messages = http_get_json(url)
-    if not isinstance(messages, list):
-        raise RuntimeError("Formato JSON inatteso per i dati Race Control.")
-    return messages
+    return fetch_list_from_api(url, "per i dati Race Control")
 
 
 def fetch_team_radio(session_key: int, driver_number):
     """Team radio per pilota e sessione selezionati."""
-    try:
-        dn_key = int(driver_number)
-    except (ValueError, TypeError):
-        raise RuntimeError("driver_number non valido per la chiamata team radio.")
+    dn_key = parse_driver_number(driver_number, "team radio")
 
     url = API_TEAM_RADIO_URL.format(session_key=session_key, driver_number=dn_key)
-    messages = http_get_json(url)
-    if not isinstance(messages, list):
-        raise RuntimeError("Formato JSON inatteso per i team radio.")
-    return messages
+    return fetch_list_from_api(url, "per i team radio")
 
 
 def set_team_radio_status(message: str):
