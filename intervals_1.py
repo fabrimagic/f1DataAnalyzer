@@ -238,7 +238,13 @@ def clear_driver_plots():
     gap_fig = None
     gap_ax = None
     gap_click_cid = None
-    gap_click_data = {"laps": [], "gap_leader": [], "gap_prev": []}
+    gap_click_data = {
+        "laps": [],
+        "gap_leader": [],
+        "gap_prev": [],
+        "raw_gap_leader": [],
+        "raw_gap_prev": [],
+    }
 
     if gap_plot_canvas is not None:
         gap_plot_canvas.get_tk_widget().destroy()
@@ -250,7 +256,7 @@ def clear_driver_plots():
 
     if gap_point_info_var is not None:
         gap_point_info_var.set(
-            "Clicca un punto sul grafico distacchi per vedere gap_to_leader e interval."
+            "Clicca un punto sul grafico distacchi per vedere gap_to_leader e interval (raw)."
         )
 
 
@@ -288,6 +294,8 @@ def on_gap_plot_click(event):
     laps = gap_click_data["laps"]
     gaps_leader = gap_click_data["gap_leader"]
     gaps_prev = gap_click_data["gap_prev"]
+    raw_gap_leader = gap_click_data.get("raw_gap_leader", [])
+    raw_gap_prev = gap_click_data.get("raw_gap_prev", [])
 
     # Trova il giro più vicino sull'asse X
     nearest_idx = min(range(len(laps)), key=lambda i: abs(laps[i] - x))
@@ -298,13 +306,20 @@ def on_gap_plot_click(event):
     lap_num = laps[nearest_idx]
     gl = gaps_leader[nearest_idx]
     gp = gaps_prev[nearest_idx]
+    gl_raw = raw_gap_leader[nearest_idx] if len(raw_gap_leader) > nearest_idx else gl
+    gp_raw = raw_gap_prev[nearest_idx] if len(raw_gap_prev) > nearest_idx else gp
 
     gl_str = f"{gl:.3f}" if isinstance(gl, (int, float)) else "N/A"
     gp_str = f"{gp:.3f}" if isinstance(gp, (int, float)) else "N/A"
 
+    gl_raw_str = str(gl_raw) if gl_raw is not None else "N/A"
+    gp_raw_str = str(gp_raw) if gp_raw is not None else "N/A"
+
     if gap_point_info_var is not None:
         gap_point_info_var.set(
-            f"Giro {lap_num}: gap_to_leader = {gl_str} s, interval = {gp_str} s"
+            f"Giro {lap_num}: "
+            f"gap_to_leader = {gl_str} s (raw: {gl_raw_str}), "
+            f"interval = {gp_str} s (raw: {gp_raw_str})"
         )
 
 
@@ -684,11 +699,16 @@ def on_show_driver_plots_click():
         gaps_leader = []
         gaps_prev = []
 
+        raw_gap_leader_vals = []
+        raw_gap_prev_vals = []
+
         for idx, entry in enumerate(intervals, start=1):
             laps_idx.append(idx)
             gap_leader = entry.get("gap_to_leader", None)
+            raw_gap_leader_vals.append(gap_leader)
             gaps_leader.append(gap_leader if isinstance(gap_leader, (int, float)) else None)
             interval_val = entry.get("interval", None)
+            raw_gap_prev_vals.append(interval_val)
             gaps_prev.append(interval_val if isinstance(interval_val, (int, float)) else None)
 
         fig_gap = Figure(figsize=(6, 3.2))
@@ -715,6 +735,8 @@ def on_show_driver_plots_click():
             "laps": laps_idx,
             "gap_leader": gaps_leader,
             "gap_prev": gaps_prev,
+            "raw_gap_leader": raw_gap_leader_vals,
+            "raw_gap_prev": raw_gap_prev_vals,
         }
         gap_click_cid = fig_gap.canvas.mpl_connect("button_press_event", on_gap_plot_click)
     else:
@@ -1205,7 +1227,9 @@ weather_plot_frame.pack(fill="both", expand=True)
 
 # Label per mostrare i valori del punto cliccato nel grafico distacchi
 gap_point_info_var = tk.StringVar(
-    value="Clicca un punto sul grafico distacchi per vedere gap_to_leader e interval."
+    value=(
+        "Clicca un punto sul grafico distacchi per vedere gap_to_leader e interval (raw)."
+    )
 )
 gap_point_info_label = ttk.Label(
     main_frame, textvariable=gap_point_info_var, anchor="w"
