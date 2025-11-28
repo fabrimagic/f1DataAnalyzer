@@ -70,6 +70,10 @@ race_timeline_last_events = []
 lift_coast_per_lap_tree = None
 lift_coast_segments_tree = None
 lift_coast_info_var = None
+lift_coast_lap_listbox = None
+lift_coast_selected_laps_var = None
+lift_coast_selection_label_var = None
+lift_coast_available_laps = []
 
 # Impostazioni per identificare scia/aria pulita e momenti chiave
 SLIPSTREAM_THRESHOLD = 1.0
@@ -487,8 +491,8 @@ def is_race_like(session_type: str) -> bool:
     return st in ("race", "sprint")
 
 
-def compute_lift_and_coast(car_data, laps_data):
-    """Calcola i segmenti di lift & coast per giro, dato car_data e laps."""
+def compute_lift_and_coast(car_data, laps_data, selected_laps):
+    """Calcola i segmenti di lift & coast per giro limitando ai giri selezionati."""
 
     per_lap = {}
     summary = {
@@ -501,12 +505,30 @@ def compute_lift_and_coast(car_data, laps_data):
     if not car_data or not laps_data:
         return {"per_lap": per_lap, "summary": summary}
 
+    selected_set = set()
+    for lap in selected_laps or []:
+        try:
+            selected_set.add(int(lap))
+        except (TypeError, ValueError):
+            continue
+
+    if not selected_set:
+        return {"per_lap": per_lap, "summary": summary}
+
     lap_intervals = []
     for lap in laps_data:
         lap_start = parse_iso_datetime(lap.get("date_start", ""))
         lap_number = lap.get("lap_number")
 
         if lap_start is None or lap_number is None:
+            continue
+
+        try:
+            lap_number_int = int(lap_number)
+        except (TypeError, ValueError):
+            continue
+
+        if selected_set and lap_number_int not in selected_set:
             continue
 
         duration_raw = lap.get("lap_duration")
@@ -521,7 +543,7 @@ def compute_lift_and_coast(car_data, laps_data):
 
         lap_intervals.append(
             {
-                "lap_number": lap_number,
+                "lap_number": lap_number_int,
                 "start": lap_start,
                 "duration": duration,
                 "end": None,
@@ -725,6 +747,73 @@ def compute_lift_and_coast(car_data, laps_data):
     summary["laps_without_lnc"] = max(0, len(per_lap) - summary["laps_with_lnc"])
 
     return {"per_lap": per_lap, "summary": summary}
+
+
+def update_lift_coast_lap_selection(laps_data):
+    """Popola la lista dei giri selezionabili per l'analisi Lift & Coast."""
+
+    global lift_coast_lap_listbox, lift_coast_selected_laps_var, lift_coast_available_laps
+
+    lift_coast_available_laps = []
+
+    if lift_coast_lap_listbox is None:
+        return
+
+    lift_coast_lap_listbox.delete(0, tk.END)
+
+    if not isinstance(laps_data, list):
+        if lift_coast_selected_laps_var is not None:
+            lift_coast_selected_laps_var.set("Giri selezionati: 0 / 5")
+        return
+
+    laps_entries = []
+    for lap in laps_data:
+        lap_number = lap.get("lap_number")
+        lap_duration = lap.get("lap_duration")
+        try:
+            lap_number_int = int(lap_number)
+        except (TypeError, ValueError):
+            continue
+
+        lap_time_txt = format_time_from_seconds(lap_duration) or "--"
+        laps_entries.append((lap_number_int, lap_time_txt))
+
+    laps_entries.sort(key=lambda x: x[0])
+    lift_coast_available_laps = [lap for lap, _ in laps_entries]
+
+    for lap_number_int, lap_time_txt in laps_entries:
+        lift_coast_lap_listbox.insert(tk.END, f"Giro {lap_number_int} - {lap_time_txt}")
+
+    if lift_coast_selected_laps_var is not None:
+        lift_coast_selected_laps_var.set("Giri selezionati: 0 / 5")
+
+
+def get_selected_lift_coast_laps():
+    if lift_coast_lap_listbox is None:
+        return []
+
+    indices = lift_coast_lap_listbox.curselection()
+    selected = []
+    for idx in indices:
+        if 0 <= idx < len(lift_coast_available_laps):
+            selected.append(lift_coast_available_laps[idx])
+    if lift_coast_selected_laps_var is not None:
+        lift_coast_selected_laps_var.set(f"Giri selezionati: {len(selected)} / 5")
+    return selected
+
+
+def on_lift_coast_selection_change(event):
+    widget = event.widget
+    if widget is None:
+        return
+
+    selected_indices = list(widget.curselection())
+    if len(selected_indices) > 5:
+        for idx in selected_indices[5:]:
+            widget.selection_clear(idx)
+        messagebox.showerror("Errore", "Puoi analizzare al massimo 5 giri per volta.")
+
+    get_selected_lift_coast_laps()
 
 
 def is_practice_session(session_name: str = "", session_type: str = "") -> bool:
@@ -1347,6 +1436,8 @@ def on_fetch_team_radio_click():
 
 def clear_lift_and_coast_view():
     global lift_coast_per_lap_tree, lift_coast_segments_tree, lift_coast_info_var
+    global lift_coast_lap_listbox, lift_coast_selected_laps_var, lift_coast_available_laps
+    global lift_coast_selection_label_var
 
     if lift_coast_per_lap_tree is not None:
         for item in lift_coast_per_lap_tree.get_children():
@@ -1361,8 +1452,21 @@ def clear_lift_and_coast_view():
             "Calcola il Lift & Coast per il pilota selezionato in una sessione di gara."
         )
 
+    if lift_coast_selected_laps_var is not None:
+        lift_coast_selected_laps_var.set("Giri selezionati: 0 / 5")
 
-def populate_lift_and_coast_tables(analysis_results, driver_name):
+    if lift_coast_selection_label_var is not None:
+        lift_coast_selection_label_var.set(
+            "Carica i giri del pilota selezionato e scegli manualmente quelli da analizzare (max 5)."
+        )
+
+    lift_coast_available_laps = []
+
+    if lift_coast_lap_listbox is not None:
+        lift_coast_lap_listbox.delete(0, tk.END)
+
+
+def populate_lift_and_coast_tables(analysis_results, driver_name, selected_laps=None):
     if lift_coast_per_lap_tree is None or lift_coast_segments_tree is None:
         return
 
@@ -1412,9 +1516,14 @@ def populate_lift_and_coast_tables(analysis_results, driver_name):
 
     if lift_coast_info_var is not None:
         driver_label = driver_name if driver_name else "pilota selezionato"
+        laps_txt = "Nessun giro selezionato"
+        selected_list = selected_laps or []
+        if selected_list:
+            laps_txt = f"Giri analizzati ({len(selected_list)}/5): {', '.join(map(str, selected_list))}"
         lift_coast_info_var.set(
             " | ".join(
                 [
+                    laps_txt,
                     f"Totale L&C {driver_label}: {total_lnc:.3f}s",
                     f"Media per giro: {avg_pct:.2f}%",
                     f"Giri con L&C: {laps_with}",
@@ -1424,7 +1533,7 @@ def populate_lift_and_coast_tables(analysis_results, driver_name):
         )
 
 
-def on_compute_lift_and_coast_click():
+def on_refresh_lift_coast_laps_click():
     global current_laps_data, current_laps_driver, current_laps_session_key
 
     session_key, session_type, _ = get_selected_session_info()
@@ -1457,6 +1566,56 @@ def on_compute_lift_and_coast_click():
             messagebox.showerror("Errore", str(e))
             return
 
+    update_lift_coast_lap_selection(current_laps_data)
+    if lift_coast_selection_label_var is not None:
+        lift_coast_selection_label_var.set(
+            f"Giri disponibili per {driver_name}: seleziona manualmente fino a 5 giri."
+        )
+    if lift_coast_info_var is not None:
+        lift_coast_info_var.set(
+            "Seleziona manualmente fino a 5 giri e premi 'Lift & Coast pilota' per l'analisi."
+        )
+
+
+def on_compute_lift_and_coast_click():
+    global current_laps_data, current_laps_driver, current_laps_session_key
+
+    session_key, session_type, _ = get_selected_session_info()
+    if session_key is None:
+        messagebox.showinfo("Info", "Seleziona prima una sessione.")
+        return
+
+    if not is_race_like(session_type):
+        messagebox.showinfo(
+            "Info",
+            "Il Lift & Coast è disponibile solo per sessioni Race o Sprint.",
+        )
+        return
+
+    driver_number, driver_name = get_selected_driver_info()
+    if driver_number is None:
+        messagebox.showinfo("Info", "Seleziona un pilota nella tabella dei risultati.")
+        return
+
+    if (
+        current_laps_session_key != session_key
+        or current_laps_driver != driver_number
+        or not current_laps_data
+    ):
+        try:
+            current_laps_data = fetch_laps(session_key, driver_number)
+            current_laps_session_key = session_key
+            current_laps_driver = driver_number
+            update_lift_coast_lap_selection(current_laps_data)
+        except RuntimeError as e:
+            messagebox.showerror("Errore", str(e))
+            return
+    elif lift_coast_available_laps and lift_coast_selected_laps_var is not None:
+        selected_preview = get_selected_lift_coast_laps()
+        lift_coast_selected_laps_var.set(
+            f"Giri selezionati: {len(selected_preview)} / 5"
+        )
+
     try:
         dn_key = parse_driver_number(driver_number, "car data")
         car_data = car_data_cache.get(session_key, {}).get(dn_key)
@@ -1466,11 +1625,20 @@ def on_compute_lift_and_coast_click():
         messagebox.showerror("Errore", str(e))
         return
 
+    selected_laps = get_selected_lift_coast_laps()
+    if not selected_laps:
+        messagebox.showinfo("Info", "Seleziona prima almeno un giro (max 5).")
+        return
+
+    if len(selected_laps) > 5:
+        messagebox.showerror("Errore", "Puoi analizzare al massimo 5 giri per volta.")
+        return
+
     status_var.set("Calcolo Lift & Coast in corso...")
     root.update_idletasks()
 
-    analysis = compute_lift_and_coast(car_data, current_laps_data)
-    populate_lift_and_coast_tables(analysis, driver_name)
+    analysis = compute_lift_and_coast(car_data, current_laps_data, selected_laps)
+    populate_lift_and_coast_tables(analysis, driver_name, selected_laps)
     plots_notebook.select(lift_coast_tab)
 
     status_var.set(
@@ -5750,8 +5918,8 @@ ttk.Button(
 # --- Contenuto tab Lift & Coast --- #
 lift_coast_info_var = tk.StringVar(
     value=(
-        "Lift & Coast: seleziona sessione Race/Sprint e pilota, poi premi 'Lift & Coast pilota' "
-        "per calcolare i segmenti di rilascio e veleggio."
+        "Lift & Coast: seleziona sessione Race/Sprint e pilota, carica i giri, scegli manualmente fino a 5 giri "
+        "(multi-selezione) e premi 'Lift & Coast pilota' per calcolare i segmenti di rilascio e veleggio."
     )
 )
 lift_coast_info_label = ttk.Label(
@@ -5762,6 +5930,56 @@ lift_coast_info_label = ttk.Label(
     style="Info.TLabel",
 )
 lift_coast_info_label.pack(fill="x", padx=5, pady=(5, 2))
+
+lift_coast_selected_laps_var = tk.StringVar(value="Giri selezionati: 0 / 5")
+lift_coast_selection_label_var = tk.StringVar(
+    value="Carica i giri del pilota selezionato e scegli manualmente quelli da analizzare (max 5)."
+)
+
+lift_coast_selection_frame = ttk.LabelFrame(
+    lift_coast_tab_frame,
+    text="Selezione giri Lift & Coast (max 5)",
+    style="Card.TLabelframe",
+)
+lift_coast_selection_frame.pack(fill="x", padx=5, pady=(0, 5))
+
+selection_header = ttk.Frame(lift_coast_selection_frame, style="Card.TFrame")
+selection_header.pack(fill="x", padx=4, pady=4)
+ttk.Label(
+    selection_header,
+    textvariable=lift_coast_selection_label_var,
+    anchor="w",
+    wraplength=1200,
+).pack(fill="x", side="left", expand=True)
+ttk.Button(
+    selection_header,
+    text="Aggiorna giri disponibili",
+    command=on_refresh_lift_coast_laps_click,
+).pack(side="right", padx=(6, 0))
+
+selection_body = ttk.Frame(lift_coast_selection_frame, style="Card.TFrame")
+selection_body.pack(fill="x", padx=4, pady=(0, 6))
+
+lift_coast_lap_listbox = tk.Listbox(
+    selection_body,
+    selectmode="extended",
+    height=6,
+    exportselection=False,
+)
+lift_coast_lap_listbox.pack(side="left", fill="x", expand=True)
+lift_coast_lap_listbox.bind("<<ListboxSelect>>", on_lift_coast_selection_change)
+lift_coast_lap_scroll = ttk.Scrollbar(
+    selection_body, orient="vertical", command=lift_coast_lap_listbox.yview
+)
+lift_coast_lap_listbox.configure(yscrollcommand=lift_coast_lap_scroll.set)
+lift_coast_lap_scroll.pack(side="left", fill="y", padx=(2, 0))
+
+ttk.Label(
+    lift_coast_selection_frame,
+    textvariable=lift_coast_selected_laps_var,
+    anchor="w",
+    style="Info.TLabel",
+).pack(fill="x", padx=4, pady=(0, 4))
 
 lift_coast_summary_frame = ttk.LabelFrame(
     lift_coast_tab_frame,
