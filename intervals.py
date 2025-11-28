@@ -9,7 +9,7 @@ import urllib.request
 import urllib.error
 import json
 import math
-from datetime import datetime
+from datetime import datetime, timedelta
 from shutil import which
 
 import pandas as pd
@@ -30,6 +30,9 @@ API_WEATHER_URL = "https://api.openf1.org/v1/weather?session_key={session_key}"
 API_RACE_CONTROL_URL = "https://api.openf1.org/v1/race_control?session_key={session_key}"
 API_TEAM_RADIO_URL = "https://api.openf1.org/v1/team_radio?session_key={session_key}&driver_number={driver_number}"
 API_OVERTAKES_URL = "https://api.openf1.org/v1/overtakes?session_key={session_key}"
+API_CAR_DATA_URL = (
+    "https://api.openf1.org/v1/car_data?session_key={session_key}&driver_number={driver_number}"
+)
 
 # Cache per le informazioni pilota
 DRIVER_CACHE = {}
@@ -64,6 +67,9 @@ team_radio_play_process = None
 race_timeline_tree = None
 race_timeline_detail_var = None
 race_timeline_last_events = []
+lift_coast_per_lap_tree = None
+lift_coast_segments_tree = None
+lift_coast_info_var = None
 
 # Impostazioni per identificare scia/aria pulita e momenti chiave
 SLIPSTREAM_THRESHOLD = 1.0
@@ -129,6 +135,7 @@ battle_pressure_session_key = None
 session_stats_last_results = []
 session_stats_session_key = None
 race_timeline_last_session_key = None
+car_data_cache = {}
 
 # Degrado gomme (Practice)
 tyre_wear_laps_tree = None
@@ -305,6 +312,16 @@ def fetch_laps(session_key: int, driver_number):
     return data
 
 
+def fetch_car_data(session_key: int, driver_number):
+    """Telemetria car_data per pilota e sessione."""
+    dn_key = parse_driver_number(driver_number, "car data")
+
+    url = API_CAR_DATA_URL.format(session_key=session_key, driver_number=dn_key)
+    data = fetch_list_from_api(url, "per i dati car_data")
+    _cache_driver_dataset(car_data_cache, session_key, dn_key, data)
+    return data
+
+
 def fetch_pit_stops(session_key: int):
     """Elenco pit stop per la sessione (tutti i piloti)."""
     url = API_PIT_URL.format(session_key=session_key)
@@ -470,6 +487,246 @@ def is_race_like(session_type: str) -> bool:
     return st in ("race", "sprint")
 
 
+def compute_lift_and_coast(car_data, laps_data):
+    """Calcola i segmenti di lift & coast per giro, dato car_data e laps."""
+
+    per_lap = {}
+    summary = {
+        "total_lnc_sec": 0.0,
+        "avg_lnc_pct": 0.0,
+        "laps_with_lnc": 0,
+        "laps_without_lnc": 0,
+    }
+
+    if not car_data or not laps_data:
+        return {"per_lap": per_lap, "summary": summary}
+
+    lap_intervals = []
+    for lap in laps_data:
+        lap_start = parse_iso_datetime(lap.get("date_start", ""))
+        lap_number = lap.get("lap_number")
+
+        if lap_start is None or lap_number is None:
+            continue
+
+        duration_raw = lap.get("lap_duration")
+        duration = None
+        if isinstance(duration_raw, (int, float)):
+            duration = float(duration_raw)
+        else:
+            try:
+                duration = float(duration_raw)
+            except (TypeError, ValueError):
+                duration = None
+
+        lap_intervals.append(
+            {
+                "lap_number": lap_number,
+                "start": lap_start,
+                "duration": duration,
+                "end": None,
+            }
+        )
+
+    lap_intervals.sort(key=lambda x: (x.get("start") or datetime.max, x.get("lap_number")))
+
+    if not lap_intervals:
+        return {"per_lap": per_lap, "summary": summary}
+
+    for idx, lap in enumerate(lap_intervals):
+        next_start = (
+            lap_intervals[idx + 1]["start"] if idx + 1 < len(lap_intervals) else None
+        )
+        duration = lap.get("duration")
+        candidate_end = None
+        if duration is not None:
+            candidate_end = lap["start"] + timedelta(seconds=duration)
+
+        if next_start and candidate_end:
+            lap["end"] = min(candidate_end, next_start)
+        elif next_start:
+            lap["end"] = next_start
+        else:
+            lap["end"] = candidate_end
+
+    lap_lookup = {lap["lap_number"]: lap for lap in lap_intervals}
+
+    def ensure_lap_entry(lap_info):
+        lap_number = lap_info["lap_number"]
+        if lap_number not in per_lap:
+            per_lap[lap_number] = {
+                "total_lnc_sec": 0.0,
+                "lnc_pct": 0.0,
+                "segments": [],
+                "lap_duration": lap_info.get("duration"),
+                "lap_start": lap_info.get("start"),
+                "lap_end": lap_info.get("end"),
+                "first_sample": None,
+                "last_sample": None,
+            }
+        return per_lap[lap_number]
+
+    def normalize_pedal(value):
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    car_samples = []
+    for item in car_data:
+        sample_dt = parse_iso_datetime(item.get("date", ""))
+        if sample_dt is None:
+            continue
+        car_samples.append(
+            {
+                "date": sample_dt,
+                "throttle": normalize_pedal(item.get("throttle")),
+                "brake": normalize_pedal(item.get("brake")),
+            }
+        )
+
+    car_samples.sort(key=lambda s: s["date"])
+
+    if not car_samples:
+        return {"per_lap": per_lap, "summary": summary}
+
+    current_segment_start = None
+    current_segment_lap = None
+
+    def close_segment(end_ts, lap_number):
+        nonlocal current_segment_start, current_segment_lap
+        if current_segment_start is None or lap_number is None:
+            current_segment_start = None
+            current_segment_lap = None
+            return
+
+        lap_info = lap_lookup.get(lap_number)
+        lap_entry = ensure_lap_entry(lap_info) if lap_info else None
+        if end_ts is None:
+            if lap_info:
+                end_ts = lap_info.get("end") or lap_entry.get("last_sample")
+        if end_ts is None:
+            current_segment_start = None
+            current_segment_lap = None
+            return
+
+        duration_sec = (end_ts - current_segment_start).total_seconds()
+        if duration_sec <= 0:
+            current_segment_start = None
+            current_segment_lap = None
+            return
+
+        start_offset = None
+        end_offset = None
+        if lap_info and lap_info.get("start"):
+            start_offset = (current_segment_start - lap_info["start"]).total_seconds()
+            end_offset = (end_ts - lap_info["start"]).total_seconds()
+
+        segment = {
+            "lap_number": lap_number,
+            "start_time": current_segment_start,
+            "end_time": end_ts,
+            "start_offset": start_offset,
+            "end_offset": end_offset,
+            "duration_sec": round(duration_sec, 3),
+        }
+
+        if lap_entry is not None:
+            lap_entry["segments"].append(segment)
+            lap_entry["total_lnc_sec"] += round(duration_sec, 3)
+
+        current_segment_start = None
+        current_segment_lap = None
+
+    lap_idx = 0
+    for sample in car_samples:
+        sample_dt = sample["date"]
+        throttle = sample.get("throttle")
+        brake = sample.get("brake")
+
+        lap_info = None
+        while lap_idx < len(lap_intervals):
+            candidate = lap_intervals[lap_idx]
+            start = candidate.get("start")
+            boundary = candidate.get("end")
+            if start is None or sample_dt < start:
+                break
+            next_start = (
+                lap_intervals[lap_idx + 1]["start"] if lap_idx + 1 < len(lap_intervals) else None
+            )
+            if boundary is None:
+                boundary = next_start
+            if boundary and sample_dt >= boundary:
+                lap_idx += 1
+                continue
+            if start and sample_dt >= start and (boundary is None or sample_dt < boundary):
+                lap_info = candidate
+                break
+            lap_idx += 1
+
+        if lap_info is None:
+            continue
+
+        lap_entry = ensure_lap_entry(lap_info)
+        if lap_entry["first_sample"] is None:
+            lap_entry["first_sample"] = sample_dt
+        lap_entry["last_sample"] = sample_dt
+
+        lap_number = lap_info["lap_number"]
+        if current_segment_start is not None and lap_number != current_segment_lap:
+            close_segment(lap_lookup.get(current_segment_lap, {}).get("end") or sample_dt, current_segment_lap)
+
+        if throttle is None and brake is None:
+            continue
+
+        if throttle is None:
+            throttle = 0.0
+        if brake is None:
+            brake = 0.0
+
+        in_lnc = throttle == 0 and brake == 0
+
+        if in_lnc:
+            if current_segment_start is None:
+                current_segment_start = sample_dt
+                current_segment_lap = lap_number
+        elif current_segment_start is not None:
+            close_segment(sample_dt, current_segment_lap)
+
+    if current_segment_start is not None:
+        close_segment(lap_lookup.get(current_segment_lap, {}).get("end") or car_samples[-1]["date"], current_segment_lap)
+
+    total_pct_values = []
+    total_lnc = 0.0
+    for lap_number, lap_entry in per_lap.items():
+        lap_duration = lap_entry.get("lap_duration")
+        if lap_duration is None and lap_entry.get("first_sample") and lap_entry.get("last_sample"):
+            lap_duration = (
+                lap_entry["last_sample"] - lap_entry["first_sample"]
+            ).total_seconds()
+
+        if isinstance(lap_duration, (int, float)) and lap_duration > 0:
+            lap_entry["lap_duration"] = float(lap_duration)
+            lap_entry["lnc_pct"] = round(
+                (lap_entry["total_lnc_sec"] / lap_entry["lap_duration"]) * 100, 2
+            )
+            total_pct_values.append(lap_entry["lnc_pct"])
+        else:
+            lap_entry["lnc_pct"] = 0.0
+
+        total_lnc += lap_entry.get("total_lnc_sec", 0.0)
+
+    summary["total_lnc_sec"] = round(total_lnc, 3)
+    if total_pct_values:
+        summary["avg_lnc_pct"] = round(sum(total_pct_values) / len(total_pct_values), 2)
+    summary["laps_with_lnc"] = len([lp for lp in per_lap.values() if lp.get("segments")])
+    summary["laps_without_lnc"] = max(0, len(per_lap) - summary["laps_with_lnc"])
+
+    return {"per_lap": per_lap, "summary": summary}
+
+
 def is_practice_session(session_name: str = "", session_type: str = "") -> bool:
     """Riconosce le sessioni Practice (FP1/FP2/FP3)."""
     name = (session_name or "").strip().lower()
@@ -581,6 +838,7 @@ def clear_driver_plots():
     clear_rain_impact_outputs()
     clear_compound_weather_outputs()
     clear_tyre_wear_view()
+    clear_lift_and_coast_view()
 
 
 def clear_weather_plot():
@@ -1082,6 +1340,142 @@ def on_fetch_team_radio_click():
         return
 
     update_team_radio_table(session_key, driver_number, driver_name)
+
+
+# --------------------- Analisi Lift & Coast --------------------- #
+
+
+def clear_lift_and_coast_view():
+    global lift_coast_per_lap_tree, lift_coast_segments_tree, lift_coast_info_var
+
+    if lift_coast_per_lap_tree is not None:
+        for item in lift_coast_per_lap_tree.get_children():
+            lift_coast_per_lap_tree.delete(item)
+
+    if lift_coast_segments_tree is not None:
+        for item in lift_coast_segments_tree.get_children():
+            lift_coast_segments_tree.delete(item)
+
+    if lift_coast_info_var is not None:
+        lift_coast_info_var.set(
+            "Calcola il Lift & Coast per il pilota selezionato in una sessione di gara."
+        )
+
+
+def populate_lift_and_coast_tables(analysis_results, driver_name):
+    if lift_coast_per_lap_tree is None or lift_coast_segments_tree is None:
+        return
+
+    clear_lift_and_coast_view()
+
+    per_lap = analysis_results.get("per_lap", {}) if isinstance(analysis_results, dict) else {}
+    summary = analysis_results.get("summary", {}) if isinstance(analysis_results, dict) else {}
+
+    def format_time_value(timestamp, offset):
+        if offset is not None:
+            return f"{offset:.3f}s"
+        if isinstance(timestamp, datetime):
+            return timestamp.strftime("%H:%M:%S.%f")[:-3]
+        return "--"
+
+    def lap_sort_key(item):
+        try:
+            return int(item[0])
+        except (TypeError, ValueError):
+            return item[0]
+
+    for lap_number, info in sorted(per_lap.items(), key=lap_sort_key):
+        total_lnc = info.get("total_lnc_sec", 0.0) or 0.0
+        pct = info.get("lnc_pct", 0.0) or 0.0
+
+        lift_coast_per_lap_tree.insert(
+            "",
+            "end",
+            values=(lap_number, f"{total_lnc:.3f}", f"{pct:.2f}"),
+        )
+
+        segments = info.get("segments", []) or []
+        for idx, seg in enumerate(segments, start=1):
+            start_txt = format_time_value(seg.get("start_time"), seg.get("start_offset"))
+            end_txt = format_time_value(seg.get("end_time"), seg.get("end_offset"))
+            duration_txt = f"{seg.get('duration_sec', 0):.3f}"
+            lift_coast_segments_tree.insert(
+                "",
+                "end",
+                values=(lap_number, idx, start_txt, end_txt, duration_txt),
+            )
+
+    total_lnc = summary.get("total_lnc_sec", 0.0) or 0.0
+    avg_pct = summary.get("avg_lnc_pct", 0.0) or 0.0
+    laps_with = summary.get("laps_with_lnc", 0) or 0
+    laps_without = summary.get("laps_without_lnc", 0) or 0
+
+    if lift_coast_info_var is not None:
+        driver_label = driver_name if driver_name else "pilota selezionato"
+        lift_coast_info_var.set(
+            " | ".join(
+                [
+                    f"Totale L&C {driver_label}: {total_lnc:.3f}s",
+                    f"Media per giro: {avg_pct:.2f}%",
+                    f"Giri con L&C: {laps_with}",
+                    f"Giri senza L&C: {laps_without}",
+                ]
+            )
+        )
+
+
+def on_compute_lift_and_coast_click():
+    global current_laps_data, current_laps_driver, current_laps_session_key
+
+    session_key, session_type, _ = get_selected_session_info()
+    if session_key is None:
+        messagebox.showinfo("Info", "Seleziona prima una sessione.")
+        return
+
+    if not is_race_like(session_type):
+        messagebox.showinfo(
+            "Info",
+            "Il Lift & Coast è disponibile solo per sessioni Race o Sprint.",
+        )
+        return
+
+    driver_number, driver_name = get_selected_driver_info()
+    if driver_number is None:
+        messagebox.showinfo("Info", "Seleziona un pilota nella tabella dei risultati.")
+        return
+
+    if (
+        current_laps_session_key != session_key
+        or current_laps_driver != driver_number
+        or not current_laps_data
+    ):
+        try:
+            current_laps_data = fetch_laps(session_key, driver_number)
+            current_laps_session_key = session_key
+            current_laps_driver = driver_number
+        except RuntimeError as e:
+            messagebox.showerror("Errore", str(e))
+            return
+
+    try:
+        dn_key = parse_driver_number(driver_number, "car data")
+        car_data = car_data_cache.get(session_key, {}).get(dn_key)
+        if car_data is None:
+            car_data = fetch_car_data(session_key, dn_key)
+    except RuntimeError as e:
+        messagebox.showerror("Errore", str(e))
+        return
+
+    status_var.set("Calcolo Lift & Coast in corso...")
+    root.update_idletasks()
+
+    analysis = compute_lift_and_coast(car_data, current_laps_data)
+    populate_lift_and_coast_tables(analysis, driver_name)
+    plots_notebook.select(lift_coast_tab)
+
+    status_var.set(
+        f"Lift & Coast calcolato per il pilota {driver_name or driver_number} in questa sessione."
+    )
 
 
 def clear_race_timeline_table():
@@ -4593,6 +4987,8 @@ initial_w = min(1500, max(1100, int(screen_w * 0.9)))
 initial_h = min(950, max(780, int(screen_h * 0.9)))
 root.geometry(f"{initial_w}x{initial_h}")
 root.minsize(max(900, min(screen_w - 140, initial_w)), max(680, min(screen_h - 160, initial_h)))
+root.rowconfigure(0, weight=1)
+root.columnconfigure(0, weight=1)
 
 DARK_BG = "#0b1220"
 DARK_PANEL = "#111827"
@@ -4756,6 +5152,7 @@ actions = [
     ("Pit window & virtual position", on_compute_pit_window_click),
     ("Race Control pilota", on_fetch_race_control_click),
     ("Team radio pilota", on_fetch_team_radio_click),
+    ("Lift & Coast pilota", on_compute_lift_and_coast_click),
     ("Degrado gomme (Practice)", on_prepare_tyre_wear_click),
 ]
 
@@ -5042,6 +5439,7 @@ stints_tab, stints_tab_frame = create_scrollable_tab(plots_notebook, padding=6, 
 tyre_wear_tab, tyre_wear_tab_frame = create_scrollable_tab(plots_notebook, padding=6, style="Card.TFrame")
 race_control_tab, race_control_tab_frame = create_scrollable_tab(plots_notebook, padding=6, style="Card.TFrame")
 team_radio_tab, team_radio_tab_frame = create_scrollable_tab(plots_notebook, padding=6, style="Card.TFrame")
+lift_coast_tab, lift_coast_tab_frame = create_scrollable_tab(plots_notebook, padding=6, style="Card.TFrame")
 weather_tab, weather_tab_frame = create_scrollable_tab(plots_notebook, padding=6, style="Card.TFrame")
 stats_tab, stats_tab_frame = create_scrollable_tab(plots_notebook, padding=6, style="Card.TFrame")
 pit_strategy_tab, pit_strategy_tab_frame = create_scrollable_tab(plots_notebook, padding=6, style="Card.TFrame")
@@ -5053,6 +5451,7 @@ plots_notebook.add(stints_tab, text="Gomme: mappa & analisi")
 plots_notebook.add(tyre_wear_tab, text="Degrado Gomme")
 plots_notebook.add(race_control_tab, text="Race Control")
 plots_notebook.add(team_radio_tab, text="Team Radio")
+plots_notebook.add(lift_coast_tab, text="Lift & Coast")
 plots_notebook.add(weather_tab, text="Meteo sessione")
 plots_notebook.add(stats_tab, text="Statistiche piloti")
 plots_notebook.add(pit_strategy_tab, text="Pit stop & strategia")
@@ -5347,6 +5746,131 @@ ttk.Button(
     text="Riproduci selezione",
     command=on_play_team_radio_click,
 ).pack(side="left", padx=(0, 6))
+
+# --- Contenuto tab Lift & Coast --- #
+lift_coast_info_var = tk.StringVar(
+    value=(
+        "Lift & Coast: seleziona sessione Race/Sprint e pilota, poi premi 'Lift & Coast pilota' "
+        "per calcolare i segmenti di rilascio e veleggio."
+    )
+)
+lift_coast_info_label = ttk.Label(
+    lift_coast_tab_frame,
+    textvariable=lift_coast_info_var,
+    anchor="w",
+    wraplength=1250,
+    style="Info.TLabel",
+)
+lift_coast_info_label.pack(fill="x", padx=5, pady=(5, 2))
+
+lift_coast_summary_frame = ttk.LabelFrame(
+    lift_coast_tab_frame,
+    text="Riepilogo per giro",
+    style="Card.TLabelframe",
+)
+lift_coast_summary_frame.pack(fill="both", expand=True, padx=5, pady=(0, 5))
+
+lift_coast_per_lap_container = ttk.Frame(
+    lift_coast_summary_frame, style="Card.TFrame"
+)
+lift_coast_per_lap_container.pack(fill="both", expand=True)
+
+lift_coast_columns = ("lap", "total", "pct")
+lift_coast_per_lap_tree = ttk.Treeview(
+    lift_coast_per_lap_container,
+    columns=lift_coast_columns,
+    show="headings",
+    height=8,
+)
+lift_coast_per_lap_tree.heading("lap", text="Giro")
+lift_coast_per_lap_tree.heading("total", text="Durata totale L&C (s)")
+lift_coast_per_lap_tree.heading("pct", text="% sul giro")
+
+lift_coast_per_lap_tree.column("lap", width=80, anchor="center")
+lift_coast_per_lap_tree.column("total", width=200, anchor="center")
+lift_coast_per_lap_tree.column("pct", width=150, anchor="center")
+
+lift_coast_per_lap_vsb = ttk.Scrollbar(
+    lift_coast_per_lap_container,
+    orient="vertical",
+    command=lift_coast_per_lap_tree.yview,
+)
+lift_coast_per_lap_hsb = ttk.Scrollbar(
+    lift_coast_per_lap_container,
+    orient="horizontal",
+    command=lift_coast_per_lap_tree.xview,
+)
+lift_coast_per_lap_tree.configure(
+    yscrollcommand=lift_coast_per_lap_vsb.set,
+    xscrollcommand=lift_coast_per_lap_hsb.set,
+)
+
+lift_coast_per_lap_tree.grid(row=0, column=0, sticky="nsew")
+lift_coast_per_lap_vsb.grid(row=0, column=1, sticky="ns")
+lift_coast_per_lap_hsb.grid(row=1, column=0, sticky="ew")
+
+lift_coast_per_lap_container.rowconfigure(0, weight=1)
+lift_coast_per_lap_container.columnconfigure(0, weight=1)
+
+lift_coast_segments_frame = ttk.LabelFrame(
+    lift_coast_tab_frame,
+    text="Segmenti Lift & Coast",
+    style="Card.TLabelframe",
+)
+lift_coast_segments_frame.pack(fill="both", expand=True, padx=5, pady=(0, 5))
+
+lift_coast_segments_container = ttk.Frame(
+    lift_coast_segments_frame, style="Card.TFrame"
+)
+lift_coast_segments_container.pack(fill="both", expand=True)
+
+lift_coast_segments_columns = (
+    "lap",
+    "segment",
+    "start",
+    "end",
+    "duration",
+)
+lift_coast_segments_tree = ttk.Treeview(
+    lift_coast_segments_container,
+    columns=lift_coast_segments_columns,
+    show="headings",
+    height=10,
+)
+
+lift_coast_segments_tree.heading("lap", text="Giro")
+lift_coast_segments_tree.heading("segment", text="# Segmento")
+lift_coast_segments_tree.heading("start", text="Inizio")
+lift_coast_segments_tree.heading("end", text="Fine")
+lift_coast_segments_tree.heading("duration", text="Durata (s)")
+
+lift_coast_segments_tree.column("lap", width=80, anchor="center")
+lift_coast_segments_tree.column("segment", width=110, anchor="center")
+lift_coast_segments_tree.column("start", width=200, anchor="center")
+lift_coast_segments_tree.column("end", width=200, anchor="center")
+lift_coast_segments_tree.column("duration", width=130, anchor="center")
+
+lift_coast_segments_vsb = ttk.Scrollbar(
+    lift_coast_segments_container,
+    orient="vertical",
+    command=lift_coast_segments_tree.yview,
+)
+lift_coast_segments_hsb = ttk.Scrollbar(
+    lift_coast_segments_container,
+    orient="horizontal",
+    command=lift_coast_segments_tree.xview,
+)
+lift_coast_segments_tree.configure(
+    yscrollcommand=lift_coast_segments_vsb.set,
+    xscrollcommand=lift_coast_segments_hsb.set,
+)
+
+lift_coast_segments_tree.grid(row=0, column=0, sticky="nsew")
+lift_coast_segments_vsb.grid(row=0, column=1, sticky="ns")
+lift_coast_segments_hsb.grid(row=1, column=0, sticky="ew")
+
+lift_coast_segments_container.rowconfigure(0, weight=1)
+lift_coast_segments_container.columnconfigure(0, weight=1)
 
 # --- Contenuto tab Race Timeline --- #
 race_timeline_info = tk.StringVar(
