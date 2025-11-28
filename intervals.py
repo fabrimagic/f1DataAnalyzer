@@ -1476,7 +1476,7 @@ def clear_lift_and_coast_view():
 
     if lift_coast_selection_label_var is not None:
         lift_coast_selection_label_var.set(
-            "Carica i giri del pilota selezionato e scegli manualmente quelli da analizzare (max 5)."
+            "Carica i giri del pilota selezionato. Puoi scegliere manualmente fino a 5 giri da analizzare; se non selezioni nulla, verranno analizzati tutti i giri."
         )
 
     lift_coast_available_laps = []
@@ -1535,10 +1535,11 @@ def populate_lift_and_coast_tables(analysis_results, driver_name, selected_laps=
 
     if lift_coast_info_var is not None:
         driver_label = driver_name if driver_name else "pilota selezionato"
-        laps_txt = "Nessun giro selezionato"
         selected_list = selected_laps or []
         if selected_list:
-            laps_txt = f"Giri analizzati ({len(selected_list)}/5): {', '.join(map(str, selected_list))}"
+            laps_txt = f"Giri analizzati: {', '.join(map(str, selected_list))}"
+        else:
+            laps_txt = "Tutti i giri disponibili analizzati"
         lift_coast_info_var.set(
             " | ".join(
                 [
@@ -1588,11 +1589,11 @@ def on_refresh_lift_coast_laps_click():
     update_lift_coast_lap_selection(current_laps_data)
     if lift_coast_selection_label_var is not None:
         lift_coast_selection_label_var.set(
-            f"Giri disponibili per {driver_name}: seleziona manualmente fino a 5 giri."
+            f"Giri disponibili per {driver_name}: seleziona manualmente fino a 5 giri oppure lascia vuoto per analizzare tutti i giri."
         )
     if lift_coast_info_var is not None:
         lift_coast_info_var.set(
-            "Seleziona manualmente fino a 5 giri e premi 'Lift & Coast pilota' per l'analisi."
+            "Seleziona manualmente fino a 5 giri e premi 'Lift & Coast pilota' per l'analisi. Se non selezioni nessun giro, verranno analizzati tutti i giri del pilota."
         )
 
 
@@ -1635,16 +1636,27 @@ def on_compute_lift_and_coast_click():
             f"Giri selezionati: {len(selected_preview)} / 5"
         )
 
-    selected_laps = get_selected_lift_coast_laps()
-    if not selected_laps:
-        messagebox.showinfo("Info", "Seleziona prima almeno un giro (max 5).")
-        return
+    selected_laps_ui = get_selected_lift_coast_laps()
 
-    if len(selected_laps) > 5:
+    if selected_laps_ui and len(selected_laps_ui) > 5:
         messagebox.showerror("Errore", "Puoi analizzare al massimo 5 giri per volta.")
         return
 
-    lap_intervals = build_lap_intervals(current_laps_data, selected_laps)
+    if selected_laps_ui:
+        laps_to_analyze = selected_laps_ui
+    else:
+        all_laps = []
+        for lap in current_laps_data:
+            num = lap.get("lap_number")
+            try:
+                num_int = int(num)
+            except (TypeError, ValueError):
+                continue
+            all_laps.append(num_int)
+
+        laps_to_analyze = sorted(set(all_laps))
+
+    lap_intervals = build_lap_intervals(current_laps_data, laps_to_analyze)
     if not lap_intervals:
         messagebox.showerror(
             "Errore",
@@ -1695,7 +1707,7 @@ def on_compute_lift_and_coast_click():
     root.update_idletasks()
 
     analysis = compute_lift_and_coast(lap_intervals, laps_car_data)
-    populate_lift_and_coast_tables(analysis, driver_name, selected_laps)
+    populate_lift_and_coast_tables(analysis, driver_name, laps_to_analyze)
     plots_notebook.select(lift_coast_tab)
 
     status_var.set(
@@ -5990,7 +6002,7 @@ lift_coast_info_label.pack(fill="x", padx=5, pady=(5, 2))
 
 lift_coast_selected_laps_var = tk.StringVar(value="Giri selezionati: 0 / 5")
 lift_coast_selection_label_var = tk.StringVar(
-    value="Carica i giri del pilota selezionato e scegli manualmente quelli da analizzare (max 5)."
+    value="Carica i giri del pilota selezionato. Puoi scegliere manualmente fino a 5 giri da analizzare; se non selezioni nulla, verranno analizzati tutti i giri."
 )
 
 lift_coast_selection_frame = ttk.LabelFrame(
