@@ -13,6 +13,7 @@ from datetime import datetime
 from shutil import which
 
 import pandas as pd
+import numpy as np
 
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -100,6 +101,7 @@ stats_tree = None
 current_stints_data = []
 current_laps_data = []
 current_laps_session_key = None
+current_laps_driver = None
 current_results_session_key = None
 current_pit_session_key = None
 
@@ -127,6 +129,14 @@ battle_pressure_session_key = None
 session_stats_last_results = []
 session_stats_session_key = None
 race_timeline_last_session_key = None
+
+# Degrado gomme (Practice)
+tyre_wear_laps_tree = None
+tyre_wear_info_var = None
+tyre_wear_results_vars = {}
+tyre_wear_canvas = None
+tyre_wear_fig = None
+tyre_wear_plot_frame = None
 
 # Pit stop & strategia
 pit_stats_tree = None
@@ -459,6 +469,16 @@ def is_race_like(session_type: str) -> bool:
     return st in ("race", "sprint")
 
 
+def is_practice_session(session_name: str = "", session_type: str = "") -> bool:
+    """Riconosce le sessioni Practice (FP1/FP2/FP3)."""
+    name = (session_name or "").strip().lower()
+    stype = (session_type or "").strip().lower()
+    practice_tokens = ("practice", "fp1", "fp2", "fp3")
+    return any(tok in name for tok in practice_tokens) or stype in practice_tokens or any(
+        stype.startswith(tok) for tok in practice_tokens
+    )
+
+
 def get_selected_session_info():
     """
     Ritorna (session_key, session_type, meeting_key) della sessione selezionata.
@@ -483,6 +503,18 @@ def get_selected_session_info():
     return session_key, session_type, meeting_key
 
 
+def get_selected_session_name():
+    selection = sessions_tree.selection()
+    if not selection:
+        return None
+
+    item_id = selection[0]
+    values = sessions_tree.item(item_id, "values")
+    if not values or len(values) < 3:
+        return None
+    return values[2]
+
+
 def get_selected_driver_info():
     """Ritorna (driver_number, driver_name) del pilota selezionato nei risultati."""
     selection = results_tree.selection()
@@ -503,7 +535,7 @@ def clear_driver_plots():
     """Rimuove i grafici distacchi e stint gomme e resetta handler click."""
     global gap_plot_canvas, stints_plot_canvas
     global gap_fig, gap_ax, gap_click_cid, gap_click_data, gap_point_info_var
-    global current_stints_data, current_laps_data, current_laps_session_key, current_stints_for_combo
+    global current_stints_data, current_laps_data, current_laps_session_key, current_stints_for_combo, current_laps_driver
 
     # Disconnette eventuale handler click dal grafico distacchi
     if gap_fig is not None and gap_click_cid is not None:
@@ -536,6 +568,7 @@ def clear_driver_plots():
     current_stints_data = []
     current_laps_data = []
     current_laps_session_key = None
+    current_laps_driver = None
     current_stints_for_combo = []
     if stints_combo is not None:
         stints_combo["values"] = ()
@@ -546,6 +579,7 @@ def clear_driver_plots():
     clear_team_radio_table()
     clear_rain_impact_outputs()
     clear_compound_weather_outputs()
+    clear_tyre_wear_view()
 
 
 def clear_weather_plot():
@@ -2966,6 +3000,355 @@ def on_show_compound_avg_click():
     stints_plot_canvas = stints_plot_canvas_local
 
 
+# --------------------- Analisi degrado gomme (Practice) --------------------- #
+
+
+def clear_tyre_wear_view():
+    global tyre_wear_canvas, tyre_wear_fig
+
+    if tyre_wear_laps_tree is not None:
+        for item in tyre_wear_laps_tree.get_children():
+            tyre_wear_laps_tree.delete(item)
+
+    if tyre_wear_canvas is not None:
+        try:
+            tyre_wear_canvas.get_tk_widget().destroy()
+        except Exception:
+            pass
+        tyre_wear_canvas = None
+        tyre_wear_fig = None
+
+    if tyre_wear_info_var is not None:
+        tyre_wear_info_var.set(
+            "Analisi degrado gomme: seleziona una sessione Practice e un pilota."
+        )
+
+    default_texts = {
+        "slope": "Degrado medio: --",
+        "intercept": "Tempo stimato all'inizio: --",
+        "r2": "Qualità del fit (R²): --",
+        "diagnosis": "Diagnosi: --",
+    }
+    for key, var in tyre_wear_results_vars.items():
+        if var is not None:
+            var.set(default_texts.get(key, "--"))
+
+
+def get_pit_lap_numbers_for_driver(session_key, driver_number):
+    try:
+        dnum = int(driver_number)
+    except (TypeError, ValueError):
+        return set()
+
+    pit_data = pit_cache.get(session_key)
+    if pit_data is None:
+        try:
+            pit_data = fetch_pit_stops(session_key)
+        except RuntimeError:
+            pit_data = []
+
+    lap_numbers = set()
+    if isinstance(pit_data, list):
+        for p in pit_data:
+            dn = p.get("driver_number")
+            lap_num = p.get("lap_number")
+            if dn == dnum and isinstance(lap_num, int):
+                lap_numbers.add(lap_num)
+    return lap_numbers
+
+
+def update_tyre_wear_laps_list(session_key, driver_number, driver_name):
+    if tyre_wear_laps_tree is None:
+        return
+
+    if not current_laps_data or current_laps_session_key != session_key or current_laps_driver != driver_number:
+        return
+
+    for item in tyre_wear_laps_tree.get_children():
+        tyre_wear_laps_tree.delete(item)
+
+    try:
+        laps_sorted = sorted(
+            current_laps_data,
+            key=lambda l: (l.get("lap_number", 9999) if isinstance(l.get("lap_number"), int) else 9999),
+        )
+    except Exception:
+        laps_sorted = current_laps_data
+
+    pit_laps = get_pit_lap_numbers_for_driver(session_key, driver_number)
+
+    for lap in laps_sorted:
+        lap_num = lap.get("lap_number", "")
+        lap_time_str = format_time_from_seconds(lap.get("lap_duration", None))
+        flags = []
+        if lap.get("is_pit_out_lap", False):
+            flags.append("Out-lap")
+        if bool(lap.get("is_pit_in_lap", False)):
+            flags.append("In-lap")
+        if isinstance(lap_num, int) and lap_num in pit_laps:
+            flags.append("Pit stop")
+        flag_str = ", ".join(flags) if flags else ""
+
+        tyre_wear_laps_tree.insert(
+            "",
+            tk.END,
+            values=(lap_num, lap_time_str, flag_str),
+        )
+
+    if tyre_wear_info_var is not None:
+        tyre_wear_info_var.set(
+            f"Giri di {driver_name} caricati: seleziona manualmente i giri da analizzare."
+        )
+
+
+def compute_tyre_wear_linear_regression(lap_points):
+    """Calcola smoothing leggero + regressione lineare e R²."""
+    if not lap_points:
+        raise ValueError("Nessun giro valido per il calcolo del degrado.")
+
+    lap_points_sorted = sorted(lap_points, key=lambda x: x[0])
+    x_vals = [lp[0] for lp in lap_points_sorted]
+    y_vals = [lp[1] for lp in lap_points_sorted]
+
+    y_smooth = []
+    for idx, _ in enumerate(y_vals):
+        neighbors = []
+        for j in (idx - 1, idx, idx + 1):
+            if 0 <= j < len(y_vals):
+                neighbors.append(y_vals[j])
+        y_smooth.append(sum(neighbors) / len(neighbors))
+
+    coeffs = np.polyfit(x_vals, y_smooth, 1)
+    slope = float(coeffs[0])
+    intercept = float(coeffs[1])
+
+    y_pred = [slope * x + intercept for x in x_vals]
+    y_mean = sum(y_smooth) / len(y_smooth)
+    ss_res = sum((ys - yp) ** 2 for ys, yp in zip(y_smooth, y_pred))
+    ss_tot = sum((ys - y_mean) ** 2 for ys in y_smooth)
+    r2 = 1.0 if ss_tot == 0 else 1 - (ss_res / ss_tot)
+
+    return {
+        "slope": slope,
+        "intercept": intercept,
+        "r2": r2,
+        "x": x_vals,
+        "y_raw": y_vals,
+        "y_smooth": y_smooth,
+        "y_pred": y_pred,
+    }
+
+
+def on_prepare_tyre_wear_click():
+    global current_laps_data, current_laps_session_key, current_laps_driver
+
+    session_key, session_type, _ = get_selected_session_info()
+    session_name = get_selected_session_name()
+
+    if session_key is None:
+        messagebox.showinfo("Info", "Seleziona prima una sessione.")
+        return
+
+    if not is_practice_session(session_name, session_type):
+        messagebox.showinfo("Info", "Analisi degrado disponibile solo per sessioni Practice.")
+        return
+
+    driver_number, driver_name = get_selected_driver_info()
+    if driver_number is None:
+        messagebox.showinfo("Info", "Seleziona un pilota nella tabella dei risultati.")
+        return
+
+    if current_laps_session_key != session_key or current_laps_driver != driver_number:
+        status_var.set(
+            f"Scarico i giri del pilota {driver_number} per la sessione {session_key}..."
+        )
+        root.update_idletasks()
+        try:
+            laps_data = fetch_laps(session_key, driver_number)
+        except RuntimeError as e:
+            messagebox.showerror("Errore", str(e))
+            status_var.set("Errore durante il recupero dei dati giri.")
+            return
+        current_laps_data = laps_data if isinstance(laps_data, list) else []
+        current_laps_session_key = session_key
+        current_laps_driver = driver_number
+
+    clear_tyre_wear_view()
+    update_tyre_wear_laps_list(session_key, driver_number, driver_name)
+    plots_notebook.select(tyre_wear_tab)
+    status_var.set(
+        "Seleziona almeno 3 giri validi (no out-lap/in-lap/pit) e premi 'Calcola degrado gomme'."
+    )
+
+
+def on_compute_tyre_wear_click():
+    global current_laps_data, current_laps_session_key, current_laps_driver
+    global tyre_wear_canvas, tyre_wear_fig
+
+    session_key, session_type, _ = get_selected_session_info()
+    session_name = get_selected_session_name()
+
+    if session_key is None:
+        messagebox.showinfo("Info", "Seleziona prima una sessione.")
+        return
+
+    if not is_practice_session(session_name, session_type):
+        messagebox.showinfo("Info", "Disponibile solo per sessioni Practice.")
+        return
+
+    driver_number, driver_name = get_selected_driver_info()
+    if driver_number is None:
+        messagebox.showinfo("Info", "Seleziona un pilota nella tabella dei risultati.")
+        return
+
+    if current_laps_session_key != session_key or current_laps_driver != driver_number:
+        try:
+            laps_data = fetch_laps(session_key, driver_number)
+        except RuntimeError as e:
+            messagebox.showerror("Errore", str(e))
+            return
+        current_laps_data = laps_data if isinstance(laps_data, list) else []
+        current_laps_session_key = session_key
+        current_laps_driver = driver_number
+        update_tyre_wear_laps_list(session_key, driver_number, driver_name)
+
+    if not current_laps_data:
+        messagebox.showinfo("Info", "Nessun dato giri disponibile per questo pilota.")
+        return
+
+    if tyre_wear_laps_tree is None:
+        messagebox.showinfo("Info", "La lista dei giri non è pronta.")
+        return
+
+    selection = tyre_wear_laps_tree.selection()
+    if not selection:
+        messagebox.showinfo("Info", "Seleziona uno o più giri da analizzare.")
+        return
+
+    lap_map = {}
+    for lap in current_laps_data:
+        ln = lap.get("lap_number")
+        if isinstance(ln, int):
+            lap_map[ln] = lap
+
+    selected_laps = []
+    for item_id in selection:
+        values = tyre_wear_laps_tree.item(item_id, "values")
+        if not values:
+            continue
+        lap_num = values[0]
+        try:
+            lap_num_int = int(lap_num)
+        except (TypeError, ValueError):
+            continue
+        lap_data = lap_map.get(lap_num_int)
+        if lap_data:
+            selected_laps.append(lap_data)
+
+    if not selected_laps:
+        messagebox.showinfo("Info", "Selezione non valida: nessun giro trovato.")
+        return
+
+    pit_laps = get_pit_lap_numbers_for_driver(session_key, driver_number)
+
+    valid_points = []
+    for lap in selected_laps:
+        ln = lap.get("lap_number")
+        ld = lap.get("lap_duration")
+        if not (isinstance(ln, int) and isinstance(ld, (int, float))):
+            continue
+        if lap.get("is_pit_out_lap", False):
+            continue
+        if lap.get("is_pit_in_lap", False):
+            continue
+        if ln in pit_laps:
+            continue
+        valid_points.append((ln, float(ld)))
+
+    if not valid_points:
+        messagebox.showinfo(
+            "Info", "Nessun giro valido (no out-lap/in-lap/pit) nella selezione."
+        )
+        return
+
+    times = [p[1] for p in valid_points]
+    mean_time = sum(times) / len(times)
+    variance = sum((t - mean_time) ** 2 for t in times) / len(times)
+    std_dev = math.sqrt(variance)
+    threshold = mean_time + 2 * std_dev
+    filtered_points = [p for p in valid_points if p[1] <= threshold]
+
+    if len(filtered_points) < 3:
+        messagebox.showinfo(
+            "Info",
+            "Seleziona almeno 3 giri validi (dopo aver escluso outlier/out-lap/in-lap/pit).",
+        )
+        return
+
+    try:
+        results = compute_tyre_wear_linear_regression(filtered_points)
+    except ValueError as e:
+        messagebox.showinfo("Info", str(e))
+        return
+
+    slope = results["slope"]
+    intercept = results["intercept"]
+    r2 = results["r2"]
+
+    slope_display = max(0.0, slope)
+    if slope_display < 0.05:
+        diagnosis = "Gomme stabili"
+    elif slope_display < 0.15:
+        diagnosis = "Degrado normale"
+    else:
+        diagnosis = "Degrado elevato"
+
+    if tyre_wear_results_vars.get("slope") is not None:
+        tyre_wear_results_vars["slope"].set(f"Degrado medio: +{slope_display:.3f} s/giro")
+    if tyre_wear_results_vars.get("intercept") is not None:
+        tyre_wear_results_vars["intercept"].set(
+            f"Tempo stimato all'inizio: {format_time_from_seconds(max(0, intercept))}"
+        )
+    if tyre_wear_results_vars.get("r2") is not None:
+        tyre_wear_results_vars["r2"].set(f"Qualità del fit (R²): {r2:.2f}")
+    if tyre_wear_results_vars.get("diagnosis") is not None:
+        tyre_wear_results_vars["diagnosis"].set(f"Diagnosi: {diagnosis}")
+
+    if tyre_wear_info_var is not None:
+        tyre_wear_info_var.set(
+            "Analisi completata: curva smussata e retta di regressione disegnate."
+        )
+
+    if tyre_wear_canvas is not None:
+        try:
+            tyre_wear_canvas.get_tk_widget().destroy()
+        except Exception:
+            pass
+
+    fig = Figure(figsize=(6.5, 3.5))
+    ax = fig.add_subplot(111)
+    ax.scatter(results["x"], results["y_raw"], color="tab:blue", label="Dati reali")
+    ax.plot(results["x"], results["y_smooth"], color="tab:orange", label="Smussati")
+    ax.plot(results["x"], results["y_pred"], color="tab:green", label="Regressione")
+    ax.set_xlabel("Giro")
+    ax.set_ylabel("Tempo sul giro (s)")
+    ax.set_title(
+        f"Degrado gomme – {driver_name} – Sessione Practice"
+    )
+    ax.grid(True, linestyle="--", linewidth=0.5)
+    ax.legend()
+
+    tyre_wear_fig_local = fig
+    tyre_wear_fig = tyre_wear_fig_local
+    tyre_wear_canvas = FigureCanvasTkAgg(tyre_wear_fig_local, master=tyre_wear_plot_frame)
+    tyre_wear_canvas.get_tk_widget().pack(fill="both", expand=True)
+    tyre_wear_canvas.draw()
+
+    plots_notebook.select(tyre_wear_tab)
+    status_var.set(
+        "Analisi degrado gomme aggiornata: verifica grafico e indicatori testuali nella tab dedicata."
+    )
+
 # --------------------- Analisi pit stop & strategia --------------------- #
 
 def compute_undercut_overcut_events(session_key, session_type, pit_data, results_data):
@@ -3900,7 +4283,7 @@ def on_show_driver_plots_click():
     """
     global gap_plot_canvas, stints_plot_canvas
     global gap_fig, gap_ax, gap_click_cid, gap_click_data
-    global current_stints_data, current_laps_data, current_laps_session_key
+    global current_stints_data, current_laps_data, current_laps_session_key, current_laps_driver
     global stints_mode_var
 
     session_key, session_type, meeting_key = get_selected_session_info()
@@ -4044,6 +4427,7 @@ def on_show_driver_plots_click():
 
     current_laps_data = laps_data if isinstance(laps_data, list) else []
     current_laps_session_key = session_key
+    current_laps_driver = driver_number
 
     populate_stints_combo()
     update_stints_summary_table()
@@ -4322,6 +4706,7 @@ actions = [
     ("Pit window & virtual position", on_compute_pit_window_click),
     ("Race Control pilota", on_fetch_race_control_click),
     ("Team radio pilota", on_fetch_team_radio_click),
+    ("Degrado gomme (Practice)", on_prepare_tyre_wear_click),
 ]
 
 for idx, (text, command) in enumerate(actions):
@@ -4604,6 +4989,7 @@ plots_notebook.pack(fill="both", expand=True, padx=4, pady=4)
 gap_tab, gap_tab_frame = create_scrollable_tab(plots_notebook, padding=6, style="Card.TFrame")
 battle_pressure_tab, battle_pressure_tab_frame = create_scrollable_tab(plots_notebook, padding=6, style="Card.TFrame")
 stints_tab, stints_tab_frame = create_scrollable_tab(plots_notebook, padding=6, style="Card.TFrame")
+tyre_wear_tab, tyre_wear_tab_frame = create_scrollable_tab(plots_notebook, padding=6, style="Card.TFrame")
 race_control_tab, race_control_tab_frame = create_scrollable_tab(plots_notebook, padding=6, style="Card.TFrame")
 team_radio_tab, team_radio_tab_frame = create_scrollable_tab(plots_notebook, padding=6, style="Card.TFrame")
 weather_tab, weather_tab_frame = create_scrollable_tab(plots_notebook, padding=6, style="Card.TFrame")
@@ -4614,6 +5000,7 @@ race_timeline_tab, race_timeline_tab_frame = create_scrollable_tab(plots_noteboo
 plots_notebook.add(gap_tab, text="Grafico distacchi")
 plots_notebook.add(battle_pressure_tab, text="Battaglie & Pressure Index")
 plots_notebook.add(stints_tab, text="Gomme: mappa & analisi")
+plots_notebook.add(tyre_wear_tab, text="Degrado Gomme")
 plots_notebook.add(race_control_tab, text="Race Control")
 plots_notebook.add(team_radio_tab, text="Team Radio")
 plots_notebook.add(weather_tab, text="Meteo sessione")
@@ -5099,6 +5486,96 @@ stints_summary_vsb.grid(row=0, column=1, sticky="ns")
 
 stints_summary_frame.rowconfigure(0, weight=1)
 stints_summary_frame.columnconfigure(0, weight=1)
+
+# --- Contenuto tab Degrado Gomme (Practice) --- #
+tyre_wear_info_var = tk.StringVar(
+    value="Analisi degrado gomme: seleziona una sessione Practice e un pilota."
+)
+ttk.Label(
+    tyre_wear_tab_frame,
+    textvariable=tyre_wear_info_var,
+    anchor="w",
+    wraplength=1250,
+    style="Info.TLabel",
+).pack(fill="x", padx=5, pady=(4, 4))
+
+tyre_wear_list_frame = ttk.LabelFrame(
+    tyre_wear_tab_frame, text="Giri disponibili (selezione multipla)"
+)
+tyre_wear_list_frame.pack(fill="both", expand=True, padx=5, pady=(0, 4))
+
+tyre_wear_columns = ("lap_number", "lap_time", "note")
+tyre_wear_laps_tree = ttk.Treeview(
+    tyre_wear_list_frame,
+    columns=tyre_wear_columns,
+    show="headings",
+    height=9,
+    selectmode="extended",
+)
+tyre_wear_laps_tree.heading("lap_number", text="Giro")
+tyre_wear_laps_tree.heading("lap_time", text="Lap time")
+tyre_wear_laps_tree.heading("note", text="Note")
+
+tyre_wear_laps_tree.column("lap_number", width=70, anchor="center")
+tyre_wear_laps_tree.column("lap_time", width=120, anchor="center")
+tyre_wear_laps_tree.column("note", width=280, anchor="w")
+
+tyre_wear_vsb = ttk.Scrollbar(
+    tyre_wear_list_frame,
+    orient="vertical",
+    command=tyre_wear_laps_tree.yview,
+)
+tyre_wear_laps_tree.configure(yscrollcommand=tyre_wear_vsb.set)
+
+tyre_wear_laps_tree.grid(row=0, column=0, sticky="nsew")
+tyre_wear_vsb.grid(row=0, column=1, sticky="ns")
+
+tyre_wear_list_frame.rowconfigure(0, weight=1)
+tyre_wear_list_frame.columnconfigure(0, weight=1)
+
+tyre_wear_controls = ttk.Frame(tyre_wear_tab_frame, style="Card.TFrame")
+tyre_wear_controls.pack(fill="x", padx=5, pady=(0, 4))
+
+ttk.Button(
+    tyre_wear_controls,
+    text="Calcola degrado gomme",
+    command=on_compute_tyre_wear_click,
+).pack(side="left")
+
+tyre_wear_results_frame = ttk.LabelFrame(tyre_wear_tab_frame, text="Risultati sintetici")
+tyre_wear_results_frame.pack(fill="x", padx=5, pady=(0, 4))
+
+tyre_wear_results_vars = {
+    "slope": tk.StringVar(value="Degrado medio: --"),
+    "intercept": tk.StringVar(value="Tempo stimato all'inizio: --"),
+    "r2": tk.StringVar(value="Qualità del fit (R²): --"),
+    "diagnosis": tk.StringVar(value="Diagnosi: --"),
+}
+
+ttk.Label(tyre_wear_results_frame, textvariable=tyre_wear_results_vars["slope"], anchor="w").grid(
+    row=0, column=0, sticky="w", padx=5, pady=2
+)
+ttk.Label(
+    tyre_wear_results_frame, textvariable=tyre_wear_results_vars["intercept"], anchor="w"
+).grid(row=0, column=1, sticky="w", padx=5, pady=2)
+ttk.Label(tyre_wear_results_frame, textvariable=tyre_wear_results_vars["r2"], anchor="w").grid(
+    row=1, column=0, sticky="w", padx=5, pady=2
+)
+ttk.Label(
+    tyre_wear_results_frame, textvariable=tyre_wear_results_vars["diagnosis"], anchor="w"
+).grid(row=1, column=1, sticky="w", padx=5, pady=2)
+
+tyre_wear_results_frame.columnconfigure(0, weight=1)
+tyre_wear_results_frame.columnconfigure(1, weight=1)
+
+ttk.Label(
+    tyre_wear_tab_frame,
+    text="Grafico smoothing + regressione",
+    font=("", 9, "bold"),
+).pack(anchor="w", padx=5)
+
+tyre_wear_plot_frame = ttk.Frame(tyre_wear_tab_frame, style="Card.TFrame")
+tyre_wear_plot_frame.pack(fill="both", expand=True, padx=5, pady=(0, 6))
 
 # --- Contenuto tab Meteo --- #
 weather_info_var = tk.StringVar(
