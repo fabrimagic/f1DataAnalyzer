@@ -7,6 +7,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import urllib.request
 import urllib.error
+import urllib.parse
 import json
 import math
 from datetime import datetime, timedelta
@@ -140,6 +141,7 @@ session_stats_last_results = []
 session_stats_session_key = None
 race_timeline_last_session_key = None
 car_data_cache = {}
+car_data_lap_cache = {}
 
 # Degrado gomme (Practice)
 tyre_wear_laps_tree = None
@@ -326,6 +328,41 @@ def fetch_car_data(session_key: int, driver_number):
     return data
 
 
+def fetch_car_data_for_lap(session_key: int, driver_number, lap_number, lap_start_dt, lap_end_dt=None):
+    """Telemetria car_data filtrata per singolo giro usando intervalli temporali."""
+
+    dn_key = parse_driver_number(driver_number, "car data")
+
+    cache_session = car_data_lap_cache.setdefault(int(session_key), {})
+    cache_driver = cache_session.setdefault(dn_key, {})
+    if lap_number in cache_driver:
+        return cache_driver[lap_number]
+
+    if lap_start_dt is None:
+        raise RuntimeError("Data di inizio giro non disponibile per la chiamata car_data.")
+
+    start_iso = lap_start_dt.isoformat()
+    if lap_start_dt.tzinfo is None:
+        start_iso += "+00:00"
+
+    params = [
+        f"session_key={session_key}",
+        f"driver_number={dn_key}",
+        f"date>{urllib.parse.quote(start_iso)}",
+    ]
+
+    if lap_end_dt is not None:
+        end_iso = lap_end_dt.isoformat()
+        if lap_end_dt.tzinfo is None:
+            end_iso += "+00:00"
+        params.append(f"date<{urllib.parse.quote(end_iso)}")
+
+    url = "https://api.openf1.org/v1/car_data?" + "&".join(params)
+    data = fetch_list_from_api(url, f"per i dati car_data del giro {lap_number}")
+    cache_driver[lap_number] = data if isinstance(data, list) else []
+    return cache_driver[lap_number]
+
+
 def fetch_pit_stops(session_key: int):
     """Elenco pit stop per la sessione (tutti i piloti)."""
     url = API_PIT_URL.format(session_key=session_key)
@@ -491,19 +528,11 @@ def is_race_like(session_type: str) -> bool:
     return st in ("race", "sprint")
 
 
-def compute_lift_and_coast(car_data, laps_data, selected_laps):
-    """Calcola i segmenti di lift & coast per giro limitando ai giri selezionati."""
+def build_lap_intervals(laps_data, selected_laps):
+    """Restituisce intervalli (start/end) per i giri selezionati, ordinati per data inizio."""
 
-    per_lap = {}
-    summary = {
-        "total_lnc_sec": 0.0,
-        "avg_lnc_pct": 0.0,
-        "laps_with_lnc": 0,
-        "laps_without_lnc": 0,
-    }
-
-    if not car_data or not laps_data:
-        return {"per_lap": per_lap, "summary": summary}
+    if not laps_data:
+        return []
 
     selected_set = set()
     for lap in selected_laps or []:
@@ -513,7 +542,7 @@ def compute_lift_and_coast(car_data, laps_data, selected_laps):
             continue
 
     if not selected_set:
-        return {"per_lap": per_lap, "summary": summary}
+        return []
 
     lap_intervals = []
     for lap in laps_data:
@@ -528,7 +557,7 @@ def compute_lift_and_coast(car_data, laps_data, selected_laps):
         except (TypeError, ValueError):
             continue
 
-        if selected_set and lap_number_int not in selected_set:
+        if lap_number_int not in selected_set:
             continue
 
         duration_raw = lap.get("lap_duration")
@@ -553,12 +582,10 @@ def compute_lift_and_coast(car_data, laps_data, selected_laps):
     lap_intervals.sort(key=lambda x: (x.get("start") or datetime.max, x.get("lap_number")))
 
     if not lap_intervals:
-        return {"per_lap": per_lap, "summary": summary}
+        return []
 
     for idx, lap in enumerate(lap_intervals):
-        next_start = (
-            lap_intervals[idx + 1]["start"] if idx + 1 < len(lap_intervals) else None
-        )
+        next_start = lap_intervals[idx + 1]["start"] if idx + 1 < len(lap_intervals) else None
         duration = lap.get("duration")
         candidate_end = None
         if duration is not None:
@@ -570,6 +597,27 @@ def compute_lift_and_coast(car_data, laps_data, selected_laps):
             lap["end"] = next_start
         else:
             lap["end"] = candidate_end
+
+        if lap.get("end") is None and lap.get("start") is not None:
+            # Fallback prudente per l'ultimo giro senza durata nota
+            lap["end"] = lap["start"] + timedelta(seconds=180)
+
+    return lap_intervals
+
+
+def compute_lift_and_coast(lap_intervals, laps_car_data):
+    """Calcola i segmenti di lift & coast per giro limitando ai dati per-lap."""
+
+    per_lap = {}
+    summary = {
+        "total_lnc_sec": 0.0,
+        "avg_lnc_pct": 0.0,
+        "laps_with_lnc": 0,
+        "laps_without_lnc": 0,
+    }
+
+    if not lap_intervals or not laps_car_data:
+        return {"per_lap": per_lap, "summary": summary}
 
     lap_lookup = {lap["lap_number"]: lap for lap in lap_intervals}
 
@@ -596,129 +644,100 @@ def compute_lift_and_coast(car_data, laps_data, selected_laps):
         except (TypeError, ValueError):
             return None
 
-    car_samples = []
-    for item in car_data:
-        sample_dt = parse_iso_datetime(item.get("date", ""))
-        if sample_dt is None:
+    for lap_info in lap_intervals:
+        lap_number = lap_info.get("lap_number")
+        lap_data = laps_car_data.get(lap_number, [])
+
+        if not lap_data:
             continue
-        car_samples.append(
-            {
-                "date": sample_dt,
-                "throttle": normalize_pedal(item.get("throttle")),
-                "brake": normalize_pedal(item.get("brake")),
-            }
-        )
 
-    car_samples.sort(key=lambda s: s["date"])
-
-    if not car_samples:
-        return {"per_lap": per_lap, "summary": summary}
-
-    current_segment_start = None
-    current_segment_lap = None
-
-    def close_segment(end_ts, lap_number):
-        nonlocal current_segment_start, current_segment_lap
-        if current_segment_start is None or lap_number is None:
-            current_segment_start = None
-            current_segment_lap = None
-            return
-
-        lap_info = lap_lookup.get(lap_number)
-        lap_entry = ensure_lap_entry(lap_info) if lap_info else None
-        if end_ts is None:
-            if lap_info:
-                end_ts = lap_info.get("end") or lap_entry.get("last_sample")
-        if end_ts is None:
-            current_segment_start = None
-            current_segment_lap = None
-            return
-
-        duration_sec = (end_ts - current_segment_start).total_seconds()
-        if duration_sec <= 0:
-            current_segment_start = None
-            current_segment_lap = None
-            return
-
-        start_offset = None
-        end_offset = None
-        if lap_info and lap_info.get("start"):
-            start_offset = (current_segment_start - lap_info["start"]).total_seconds()
-            end_offset = (end_ts - lap_info["start"]).total_seconds()
-
-        segment = {
-            "lap_number": lap_number,
-            "start_time": current_segment_start,
-            "end_time": end_ts,
-            "start_offset": start_offset,
-            "end_offset": end_offset,
-            "duration_sec": round(duration_sec, 3),
-        }
-
-        if lap_entry is not None:
-            lap_entry["segments"].append(segment)
-            lap_entry["total_lnc_sec"] += round(duration_sec, 3)
-
-        current_segment_start = None
-        current_segment_lap = None
-
-    lap_idx = 0
-    for sample in car_samples:
-        sample_dt = sample["date"]
-        throttle = sample.get("throttle")
-        brake = sample.get("brake")
-
-        lap_info = None
-        while lap_idx < len(lap_intervals):
-            candidate = lap_intervals[lap_idx]
-            start = candidate.get("start")
-            boundary = candidate.get("end")
-            if start is None or sample_dt < start:
-                break
-            next_start = (
-                lap_intervals[lap_idx + 1]["start"] if lap_idx + 1 < len(lap_intervals) else None
-            )
-            if boundary is None:
-                boundary = next_start
-            if boundary and sample_dt >= boundary:
-                lap_idx += 1
+        car_samples = []
+        for item in lap_data:
+            sample_dt = parse_iso_datetime(item.get("date", ""))
+            if sample_dt is None:
                 continue
-            if start and sample_dt >= start and (boundary is None or sample_dt < boundary):
-                lap_info = candidate
-                break
-            lap_idx += 1
+            car_samples.append(
+                {
+                    "date": sample_dt,
+                    "throttle": normalize_pedal(item.get("throttle")),
+                    "brake": normalize_pedal(item.get("brake")),
+                }
+            )
 
-        if lap_info is None:
+        car_samples.sort(key=lambda s: s["date"])
+
+        if not car_samples:
             continue
 
         lap_entry = ensure_lap_entry(lap_info)
-        if lap_entry["first_sample"] is None:
-            lap_entry["first_sample"] = sample_dt
-        lap_entry["last_sample"] = sample_dt
 
-        lap_number = lap_info["lap_number"]
-        if current_segment_start is not None and lap_number != current_segment_lap:
-            close_segment(lap_lookup.get(current_segment_lap, {}).get("end") or sample_dt, current_segment_lap)
+        current_segment_start = None
 
-        if throttle is None and brake is None:
-            continue
-
-        if throttle is None:
-            throttle = 0.0
-        if brake is None:
-            brake = 0.0
-
-        in_lnc = throttle == 0 and brake == 0
-
-        if in_lnc:
+        def close_segment(end_ts):
+            nonlocal current_segment_start
             if current_segment_start is None:
-                current_segment_start = sample_dt
-                current_segment_lap = lap_number
-        elif current_segment_start is not None:
-            close_segment(sample_dt, current_segment_lap)
+                return
 
-    if current_segment_start is not None:
-        close_segment(lap_lookup.get(current_segment_lap, {}).get("end") or car_samples[-1]["date"], current_segment_lap)
+            boundary = lap_info.get("end")
+            if boundary is None and lap_entry.get("last_sample"):
+                boundary = lap_entry["last_sample"]
+            if end_ts is None:
+                end_ts = boundary
+            if end_ts is None:
+                current_segment_start = None
+                return
+
+            duration_sec = (end_ts - current_segment_start).total_seconds()
+            if duration_sec <= 0:
+                current_segment_start = None
+                return
+
+            start_offset = None
+            end_offset = None
+            if lap_info.get("start"):
+                start_offset = (current_segment_start - lap_info["start"]).total_seconds()
+                end_offset = (end_ts - lap_info["start"]).total_seconds()
+
+            segment = {
+                "lap_number": lap_number,
+                "start_time": current_segment_start,
+                "end_time": end_ts,
+                "start_offset": start_offset,
+                "end_offset": end_offset,
+                "duration_sec": round(duration_sec, 3),
+            }
+
+            lap_entry["segments"].append(segment)
+            lap_entry["total_lnc_sec"] += round(duration_sec, 3)
+            current_segment_start = None
+
+        for sample in car_samples:
+            sample_dt = sample["date"]
+            throttle = sample.get("throttle")
+            brake = sample.get("brake")
+
+            if lap_entry["first_sample"] is None:
+                lap_entry["first_sample"] = sample_dt
+            lap_entry["last_sample"] = sample_dt
+
+            if throttle is None and brake is None:
+                continue
+
+            if throttle is None:
+                throttle = 0.0
+            if brake is None:
+                brake = 0.0
+
+            in_lnc = throttle == 0 and brake == 0
+
+            if in_lnc:
+                if current_segment_start is None:
+                    current_segment_start = sample_dt
+            elif current_segment_start is not None:
+                close_segment(sample_dt)
+
+        if current_segment_start is not None:
+            close_segment(lap_info.get("end") or car_samples[-1]["date"])
 
     total_pct_values = []
     total_lnc = 0.0
@@ -1616,15 +1635,6 @@ def on_compute_lift_and_coast_click():
             f"Giri selezionati: {len(selected_preview)} / 5"
         )
 
-    try:
-        dn_key = parse_driver_number(driver_number, "car data")
-        car_data = car_data_cache.get(session_key, {}).get(dn_key)
-        if car_data is None:
-            car_data = fetch_car_data(session_key, dn_key)
-    except RuntimeError as e:
-        messagebox.showerror("Errore", str(e))
-        return
-
     selected_laps = get_selected_lift_coast_laps()
     if not selected_laps:
         messagebox.showinfo("Info", "Seleziona prima almeno un giro (max 5).")
@@ -1634,10 +1644,57 @@ def on_compute_lift_and_coast_click():
         messagebox.showerror("Errore", "Puoi analizzare al massimo 5 giri per volta.")
         return
 
+    lap_intervals = build_lap_intervals(current_laps_data, selected_laps)
+    if not lap_intervals:
+        messagebox.showerror(
+            "Errore",
+            "Impossibile determinare gli intervalli temporali dei giri selezionati.",
+        )
+        return
+
+    laps_car_data = {}
+    for lap in lap_intervals:
+        lap_num = lap.get("lap_number")
+        if lap.get("start") is None:
+            messagebox.showerror(
+                "Errore",
+                f"Data/ora di inizio non disponibile per il giro {lap_num}. Giro saltato.",
+            )
+            continue
+
+        try:
+            lap_data = fetch_car_data_for_lap(
+                session_key,
+                driver_number,
+                lap_num,
+                lap.get("start"),
+                lap.get("end"),
+            )
+            laps_car_data[lap_num] = lap_data
+        except RuntimeError as e:
+            err_msg = str(e)
+            if "HTTP 422" in err_msg:
+                messagebox.showerror(
+                    "Errore", f"Errore nel recupero telemetria per il giro {lap_num} (HTTP 422). Questo giro non verrà incluso nell'analisi."
+                )
+            else:
+                messagebox.showerror(
+                    "Errore",
+                    f"Errore nel recupero telemetria per il giro {lap_num}: {err_msg}\nIl giro non verrà incluso nell'analisi.",
+                )
+            continue
+
+    if not laps_car_data:
+        messagebox.showerror(
+            "Errore",
+            "Non sono stati recuperati dati telemetrici per i giri selezionati.",
+        )
+        return
+
     status_var.set("Calcolo Lift & Coast in corso...")
     root.update_idletasks()
 
-    analysis = compute_lift_and_coast(car_data, current_laps_data, selected_laps)
+    analysis = compute_lift_and_coast(lap_intervals, laps_car_data)
     populate_lift_and_coast_tables(analysis, driver_name, selected_laps)
     plots_notebook.select(lift_coast_tab)
 
