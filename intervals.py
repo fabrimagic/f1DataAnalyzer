@@ -134,6 +134,7 @@ race_timeline_last_session_key = None
 tyre_wear_laps_tree = None
 tyre_wear_info_var = None
 tyre_wear_results_vars = {}
+tyre_wear_level_label = None
 tyre_wear_canvas = None
 tyre_wear_fig = None
 tyre_wear_plot_frame = None
@@ -3004,7 +3005,7 @@ def on_show_compound_avg_click():
 
 
 def clear_tyre_wear_view():
-    global tyre_wear_canvas, tyre_wear_fig
+    global tyre_wear_canvas, tyre_wear_fig, tyre_wear_level_label
 
     if tyre_wear_laps_tree is not None:
         for item in tyre_wear_laps_tree.get_children():
@@ -3028,10 +3029,17 @@ def clear_tyre_wear_view():
         "intercept": "Tempo stimato all'inizio: --",
         "r2": "Qualità del fit (R²): --",
         "diagnosis": "Diagnosi: --",
+        "degradation_level": "Livello degrado: --",
     }
     for key, var in tyre_wear_results_vars.items():
         if var is not None:
             var.set(default_texts.get(key, "--"))
+
+    if tyre_wear_level_label is not None:
+        try:
+            tyre_wear_level_label.config(fg="black")
+        except Exception:
+            pass
 
 
 def get_pit_lap_numbers_for_driver(session_key, driver_number):
@@ -3099,6 +3107,31 @@ def update_tyre_wear_laps_list(session_key, driver_number, driver_name):
         tyre_wear_info_var.set(
             f"Giri di {driver_name} caricati: seleziona manualmente i giri da analizzare."
         )
+
+
+def classify_tyre_degradation(m: float) -> str:
+    """
+    Classifica il degrado gomme in base alla pendenza m (s/giro).
+    Restituisce una stringa tra: 'Basso', 'Medio', 'Alto', 'Critico'.
+    """
+    try:
+        slope = float(m)
+    except (TypeError, ValueError):
+        slope = 0.0
+
+    if math.isnan(slope) or math.isinf(slope):
+        slope = 0.0
+
+    # Pendenze negative o molto piccole vengono considerate stabili.
+    slope = max(0.0, slope)
+
+    if slope < 0.05:
+        return "Basso"
+    if slope < 0.12:
+        return "Medio"
+    if slope < 0.20:
+        return "Alto"
+    return "Critico"
 
 
 def compute_tyre_wear_linear_regression(lap_points):
@@ -3183,7 +3216,7 @@ def on_prepare_tyre_wear_click():
 
 def on_compute_tyre_wear_click():
     global current_laps_data, current_laps_session_key, current_laps_driver
-    global tyre_wear_canvas, tyre_wear_fig
+    global tyre_wear_canvas, tyre_wear_fig, tyre_wear_level_label
 
     session_key, session_type, _ = get_selected_session_info()
     session_name = get_selected_session_name()
@@ -3296,6 +3329,7 @@ def on_compute_tyre_wear_click():
     r2 = results["r2"]
 
     slope_display = max(0.0, slope)
+    degradation_level = classify_tyre_degradation(slope)
     if slope_display < 0.05:
         diagnosis = "Gomme stabili"
     elif slope_display < 0.15:
@@ -3313,6 +3347,22 @@ def on_compute_tyre_wear_click():
         tyre_wear_results_vars["r2"].set(f"Qualità del fit (R²): {r2:.2f}")
     if tyre_wear_results_vars.get("diagnosis") is not None:
         tyre_wear_results_vars["diagnosis"].set(f"Diagnosi: {diagnosis}")
+    if tyre_wear_results_vars.get("degradation_level") is not None:
+        tyre_wear_results_vars["degradation_level"].set(
+            f"Livello degrado: {degradation_level} (+{slope_display:.3f} s/giro)"
+        )
+
+    level_colors = {
+        "Basso": "green",
+        "Medio": "goldenrod",
+        "Alto": "darkorange",
+        "Critico": "red",
+    }
+    if tyre_wear_level_label is not None:
+        try:
+            tyre_wear_level_label.config(fg=level_colors.get(degradation_level, "black"))
+        except Exception:
+            pass
 
     if tyre_wear_info_var is not None:
         tyre_wear_info_var.set(
@@ -5550,6 +5600,7 @@ tyre_wear_results_vars = {
     "intercept": tk.StringVar(value="Tempo stimato all'inizio: --"),
     "r2": tk.StringVar(value="Qualità del fit (R²): --"),
     "diagnosis": tk.StringVar(value="Diagnosi: --"),
+    "degradation_level": tk.StringVar(value="Livello degrado: --"),
 }
 
 ttk.Label(tyre_wear_results_frame, textvariable=tyre_wear_results_vars["slope"], anchor="w").grid(
@@ -5564,6 +5615,12 @@ ttk.Label(tyre_wear_results_frame, textvariable=tyre_wear_results_vars["r2"], an
 ttk.Label(
     tyre_wear_results_frame, textvariable=tyre_wear_results_vars["diagnosis"], anchor="w"
 ).grid(row=1, column=1, sticky="w", padx=5, pady=2)
+tyre_wear_level_label = tk.Label(
+    tyre_wear_results_frame,
+    textvariable=tyre_wear_results_vars["degradation_level"],
+    anchor="w",
+)
+tyre_wear_level_label.grid(row=2, column=0, columnspan=2, sticky="w", padx=5, pady=2)
 
 tyre_wear_results_frame.columnconfigure(0, weight=1)
 tyre_wear_results_frame.columnconfigure(1, weight=1)
