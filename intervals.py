@@ -1838,6 +1838,9 @@ def on_race_timeline_select(event=None):
 def on_generate_race_timeline_click():
     """Handler per costruire la Race Timeline unificata."""
     global weather_last_data, weather_last_session_key
+    global current_results_data, current_results_session_key
+    global current_pit_data, current_pit_session_key
+    global current_laps_data, current_laps_session_key, current_laps_driver
 
     session_key, session_type, _ = get_selected_session_info()
     if session_key is None:
@@ -1853,8 +1856,53 @@ def on_generate_race_timeline_click():
     status_var.set("Genero la timeline di gara unificando eventi...")
     root.update_idletasks()
 
+    driver_number, _ = get_selected_driver_info()
+
+    results_data = current_results_data if current_results_session_key == session_key else []
+    if not results_data:
+        try:
+            fetched_results = fetch_session_results(session_key)
+            results_sorted = sorted(
+                fetched_results,
+                key=lambda r: (r.get("position", 9999) if isinstance(r.get("position"), int) else 9999),
+            )
+            current_results_data = results_sorted
+            current_results_session_key = session_key
+            results_data = results_sorted
+        except RuntimeError:
+            messagebox.showerror("Risultati", "Impossibile recuperare i risultati della sessione.")
+            results_data = []
+
+    pit_data = current_pit_data if current_pit_session_key == session_key else []
+    if is_race_like(session_type) and not pit_data:
+        try:
+            pit_data = fetch_pit_stops(session_key)
+            current_pit_data = pit_data
+            current_pit_session_key = session_key
+        except RuntimeError:
+            messagebox.showerror("Pit stop", "Impossibile recuperare i pit stop della sessione.")
+            pit_data = []
+
     laps_data = current_laps_data if current_laps_session_key == session_key else []
+    if driver_number is not None and (not laps_data or current_laps_driver != driver_number):
+        try:
+            laps_data = fetch_laps(session_key, driver_number)
+            current_laps_data = laps_data
+            current_laps_session_key = session_key
+            current_laps_driver = driver_number
+        except RuntimeError:
+            messagebox.showerror("Laps", "Impossibile recuperare i giri per il pilota selezionato.")
+            laps_data = []
+
     weather_data = weather_last_data if weather_last_session_key == session_key else []
+    if not weather_data:
+        try:
+            weather_data = fetch_weather(session_key)
+            weather_last_data = weather_data
+            weather_last_session_key = session_key
+        except RuntimeError:
+            messagebox.showerror("Meteo", "Impossibile recuperare i dati meteo della sessione.")
+            weather_data = []
 
     try:
         race_control_messages = fetch_race_control_messages(session_key)
@@ -1862,7 +1910,6 @@ def on_generate_race_timeline_click():
         race_control_messages = []
         messagebox.showerror("Race Control", str(e))
 
-    driver_number, _ = get_selected_driver_info()
     team_radio_messages = []
     if driver_number is not None:
         try:
@@ -1873,8 +1920,8 @@ def on_generate_race_timeline_click():
 
     events = compute_race_timeline(
         session_key,
-        current_results_data,
-        current_pit_data,
+        results_data,
+        pit_data,
         laps_data,
         weather_data,
         race_control_messages,
