@@ -2247,14 +2247,15 @@ def compute_race_timeline(
         overtakes = []
 
     for ot in overtakes:
-        ts = resolve_timestamp(ot.get("date"))
+        lap_num = ot.get("lap_number")
+        ts = resolve_timestamp(ot.get("date"), lap_num)
         overtaking = resolve_driver_label(ot.get("overtaking_driver_number"))
         overtaken = resolve_driver_label(ot.get("overtaken_driver_number"))
         position = ot.get("position")
         pos_txt = f" per P{position}" if isinstance(position, int) else ""
         add_event(
             ts,
-            None,
+            lap_num if isinstance(lap_num, int) else None,
             "Sorpasso",
             f"{overtaking} supera {overtaken}{pos_txt}",
             f"{overtaking} vs {overtaken}",
@@ -2266,12 +2267,30 @@ def compute_race_timeline(
         ts = resolve_timestamp(pit.get("date"), lap_num)
         driver_label = resolve_driver_label(pit.get("driver_number"))
         pit_dur = pit.get("pit_duration")
-        dur_txt = f" in {pit_dur:.3f}s" if isinstance(pit_dur, (int, float)) else ""
+        pit_time = pit.get("pit_time")
+        tyre_compound = pit.get("compound") or pit.get("tyre_compound")
+        tyre_age = pit.get("tyre_age_at_pit") or pit.get("tyre_age")
+        stint_number = pit.get("stint_number")
+
+        details = []
+        if isinstance(pit_dur, (int, float)):
+            details.append(f"{pit_dur:.3f}s")
+        if pit_time:
+            details.append(f"ora box: {pit_time}")
+        if isinstance(stint_number, int):
+            details.append(f"stint {stint_number}")
+        if tyre_compound:
+            tyre_info = str(tyre_compound)
+            if isinstance(tyre_age, (int, float)):
+                tyre_info += f" (giro gomma: {tyre_age})"
+            details.append(tyre_info)
+
+        details_txt = f" ({', '.join(details)})" if details else ""
         add_event(
             ts,
             lap_num,
             "Pit stop",
-            f"{driver_label} effettua un pit{dur_txt}",
+            f"{driver_label} effettua un pit{details_txt}",
             driver_label,
         )
 
@@ -2297,13 +2316,21 @@ def compute_race_timeline(
     # Meteo: pioggia o variazioni track temp
     prev_rain = None
     prev_track_temp = None
+    prev_air_temp = None
     for w in weather_last_data or []:
         ts = resolve_timestamp(w.get("date"))
         rain = w.get("rainfall")
         track_temp = w.get("track_temperature")
+        air_temp = w.get("air_temperature")
         if isinstance(rain, (int, float)):
             if (prev_rain is None or prev_rain <= 0) and rain > 0:
                 add_event(ts, None, "Meteo", f"Pioggia rilevata ({rain} mm/h)")
+            elif isinstance(prev_rain, (int, float)):
+                if prev_rain > 0 and rain <= 0:
+                    add_event(ts, None, "Meteo", "Cessa la pioggia")
+                elif abs(rain - prev_rain) >= 2:
+                    trend = "aumenta" if rain > prev_rain else "diminuisce"
+                    add_event(ts, None, "Meteo", f"Intensità pioggia {trend} a {rain} mm/h")
             prev_rain = rain
         if isinstance(track_temp, (int, float)) and isinstance(prev_track_temp, (int, float)):
             delta = track_temp - prev_track_temp
@@ -2312,6 +2339,13 @@ def compute_race_timeline(
                 add_event(ts, None, "Meteo", f"Track temp {trend} di {abs(delta):.1f}°C")
         if isinstance(track_temp, (int, float)):
             prev_track_temp = track_temp
+        if isinstance(air_temp, (int, float)) and isinstance(prev_air_temp, (int, float)):
+            delta_air = air_temp - prev_air_temp
+            if abs(delta_air) >= 3:
+                trend = "sale" if delta_air > 0 else "scende"
+                add_event(ts, None, "Meteo", f"Air temp {trend} di {abs(delta_air):.1f}°C")
+        if isinstance(air_temp, (int, float)):
+            prev_air_temp = air_temp
 
     # Analisi gap su giri correnti
     laps_sorted = []
