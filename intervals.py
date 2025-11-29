@@ -495,6 +495,58 @@ def format_time_from_seconds(seconds_value):
     return f"{minutes:02d}:{seconds:02d}.{millis:03d}"
 
 
+def parse_lap_time_value(value):
+    """Converte una stringa/numero tempo giro in secondi (float) oppure None."""
+    if isinstance(value, (int, float)):
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return None
+
+    if isinstance(value, str):
+        val = value.strip()
+        if not val:
+            return None
+
+        parts = val.split(":")
+        try:
+            if len(parts) == 3:
+                hours = float(parts[0])
+                minutes = float(parts[1])
+                seconds = float(parts[2])
+                return hours * 3600 + minutes * 60 + seconds
+            if len(parts) == 2:
+                minutes = float(parts[0])
+                seconds = float(parts[1])
+                return minutes * 60 + seconds
+            return float(val)
+        except ValueError:
+            return None
+
+    return None
+
+
+def extract_best_qualifying_lap(result_row: dict):
+    """Estrae il miglior tempo utile per la qualifica dal risultato fornito."""
+    if not isinstance(result_row, dict):
+        return None
+
+    for key in ("best_lap_time", "best_lap", "best_lap_duration"):
+        lap_val = parse_lap_time_value(result_row.get(key))
+        if lap_val is not None:
+            return lap_val
+
+    best_from_segments = None
+    for q_key in ("q1", "q2", "q3"):
+        lap_val = parse_lap_time_value(result_row.get(q_key))
+        if lap_val is None:
+            continue
+        if best_from_segments is None or lap_val < best_from_segments:
+            best_from_segments = lap_val
+
+    return best_from_segments
+
+
 def parse_iso_datetime(value: str):
     """Parsing sicuro per stringhe ISO8601 restituite dall'API (gestisce suffisso Z)."""
     if not isinstance(value, str) or not value:
@@ -4921,6 +4973,22 @@ def on_fetch_results_click(event=None):
     current_results_data = results_sorted
     current_results_session_key = session_key
 
+    is_qualifying = session_type in ("Qualifying", "Sprint Qualifying")
+    best_lap_per_driver = {}
+    leader_best_lap = None
+
+    if is_qualifying:
+        for entry in results_sorted:
+            best_lap_val = extract_best_qualifying_lap(entry)
+            driver_id = entry.get("driver_number")
+
+            if best_lap_val is None or driver_id is None:
+                continue
+
+            best_lap_per_driver[driver_id] = best_lap_val
+            if leader_best_lap is None or best_lap_val < leader_best_lap:
+                leader_best_lap = best_lap_val
+
     for r in results_sorted:
         position = r.get("position", "")
         driver_number = r.get("driver_number", "")
@@ -4941,6 +5009,12 @@ def on_fetch_results_click(event=None):
             status_str = "Finished"
 
         gap = r.get("gap_to_leader", "")
+
+        if is_qualifying and leader_best_lap is not None:
+            driver_best_lap = best_lap_per_driver.get(driver_number)
+            if isinstance(driver_best_lap, (int, float)):
+                gap_time = max(0.0, driver_best_lap - leader_best_lap)
+                gap = f"+{gap_time:.3f}" if gap_time > 0 else "0.000"
 
         duration_val = r.get("duration", "")
         if isinstance(duration_val, (int, float)):
