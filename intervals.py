@@ -69,6 +69,7 @@ team_radio_play_process = None
 race_timeline_tree = None
 race_timeline_detail_var = None
 race_timeline_last_events = []
+race_timeline_last_session_key = None
 lift_coast_per_lap_tree = None
 lift_coast_segments_tree = None
 lift_coast_info_var = None
@@ -76,6 +77,10 @@ lift_coast_lap_listbox = None
 lift_coast_selected_laps_var = None
 lift_coast_selection_label_var = None
 lift_coast_available_laps = []
+lift_coast_last_results = None
+lift_coast_last_driver = None
+lift_coast_last_session_key = None
+lift_coast_last_selected_laps = []
 
 # Impostazioni per identificare scia/aria pulita e momenti chiave
 SLIPSTREAM_THRESHOLD = 1.0
@@ -1973,6 +1978,8 @@ def clear_lift_and_coast_view():
     global lift_coast_per_lap_tree, lift_coast_segments_tree, lift_coast_info_var
     global lift_coast_lap_listbox, lift_coast_selected_laps_var, lift_coast_available_laps
     global lift_coast_selection_label_var
+    global lift_coast_last_results, lift_coast_last_driver, lift_coast_last_session_key
+    global lift_coast_last_selected_laps
 
     if lift_coast_per_lap_tree is not None:
         for item in lift_coast_per_lap_tree.get_children():
@@ -2000,8 +2007,15 @@ def clear_lift_and_coast_view():
     if lift_coast_lap_listbox is not None:
         lift_coast_lap_listbox.delete(0, tk.END)
 
+    lift_coast_last_results = None
+    lift_coast_last_driver = None
+    lift_coast_last_session_key = None
+    lift_coast_last_selected_laps = []
+
 
 def populate_lift_and_coast_tables(analysis_results, driver_name, selected_laps=None):
+    global lift_coast_last_results, lift_coast_last_driver, lift_coast_last_session_key
+    global lift_coast_last_selected_laps
     if lift_coast_per_lap_tree is None or lift_coast_segments_tree is None:
         return
 
@@ -2009,6 +2023,11 @@ def populate_lift_and_coast_tables(analysis_results, driver_name, selected_laps=
 
     per_lap = analysis_results.get("per_lap", {}) if isinstance(analysis_results, dict) else {}
     summary = analysis_results.get("summary", {}) if isinstance(analysis_results, dict) else {}
+
+    lift_coast_last_results = analysis_results
+    lift_coast_last_driver = driver_name
+    lift_coast_last_session_key, _, _ = get_selected_session_info()
+    lift_coast_last_selected_laps = list(selected_laps) if selected_laps else []
 
     def format_time_value(timestamp, offset):
         if offset is not None:
@@ -2066,6 +2085,99 @@ def populate_lift_and_coast_tables(analysis_results, driver_name, selected_laps=
                     f"Giri senza L&C: {laps_without}",
                 ]
             )
+        )
+
+
+def on_export_lift_coast_click():
+    global lift_coast_last_results, lift_coast_last_driver, lift_coast_last_selected_laps
+    if not lift_coast_last_results:
+        messagebox.showinfo(
+            "Export Lift & Coast", "Calcola prima l'analisi Lift & Coast da esportare."
+        )
+        return
+
+    filepath = filedialog.asksaveasfilename(
+        defaultextension=".csv",
+        filetypes=[("File CSV", "*.csv"), ("Tutti i file", "*.*")],
+        title="Esporta Lift & Coast",
+    )
+
+    if not filepath:
+        return
+
+    per_lap = lift_coast_last_results.get("per_lap", {}) if isinstance(lift_coast_last_results, dict) else {}
+    summary = lift_coast_last_results.get("summary", {}) if isinstance(lift_coast_last_results, dict) else {}
+
+    def format_time_value(timestamp, offset):
+        if offset is not None:
+            return f"{offset:.3f}s"
+        if isinstance(timestamp, datetime):
+            return timestamp.strftime("%H:%M:%S.%f")[:-3]
+        return ""
+
+    def lap_sort_key(item):
+        try:
+            return int(item[0])
+        except (TypeError, ValueError):
+            return item[0]
+
+    try:
+        with open(filepath, "w", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+
+            laps_label = (
+                ", ".join(map(str, lift_coast_last_selected_laps))
+                if lift_coast_last_selected_laps
+                else "Tutti i giri disponibili"
+            )
+
+            writer.writerow(["Lift & Coast"])
+            writer.writerow(["Pilota", lift_coast_last_driver or ""])
+            writer.writerow(["Sessione", lift_coast_last_session_key or ""])
+            writer.writerow(["Giri analizzati", laps_label])
+            writer.writerow(
+                [
+                    "Totale L&C (s)",
+                    f"{summary.get('total_lnc_sec', 0.0) or 0.0:.3f}",
+                ]
+            )
+            writer.writerow(
+                [
+                    "Media % sul giro",
+                    f"{summary.get('avg_lnc_pct', 0.0) or 0.0:.2f}%",
+                ]
+            )
+            writer.writerow(["Giri con L&C", summary.get("laps_with_lnc", 0) or 0])
+            writer.writerow(["Giri senza L&C", summary.get("laps_without_lnc", 0) or 0])
+
+            writer.writerow([])
+            writer.writerow(["Riepilogo per giro"])
+            writer.writerow(["Giro", "Durata totale L&C (s)", "% sul giro"])
+
+            for lap_number, info in sorted(per_lap.items(), key=lap_sort_key):
+                total_lnc = info.get("total_lnc_sec", 0.0) or 0.0
+                pct = info.get("lnc_pct", 0.0) or 0.0
+                writer.writerow([lap_number, f"{total_lnc:.3f}", f"{pct:.2f}"])
+
+            writer.writerow([])
+            writer.writerow(["Segmenti Lift & Coast"])
+            writer.writerow(["Giro", "# Segmento", "Inizio", "Fine", "Durata (s)"])
+
+            for lap_number, info in sorted(per_lap.items(), key=lap_sort_key):
+                segments = info.get("segments", []) or []
+                for idx, seg in enumerate(segments, start=1):
+                    start_txt = format_time_value(seg.get("start_time"), seg.get("start_offset"))
+                    end_txt = format_time_value(seg.get("end_time"), seg.get("end_offset"))
+                    duration_txt = f"{seg.get('duration_sec', 0) or 0.0:.3f}"
+                    writer.writerow([lap_number, idx, start_txt, end_txt, duration_txt])
+
+        messagebox.showinfo(
+            "Export Lift & Coast",
+            f"Dati Lift & Coast esportati in formato CSV in:\n{filepath}",
+        )
+    except OSError as e:
+        messagebox.showerror(
+            "Export Lift & Coast", f"Impossibile salvare il file: {e}"
         )
 
 
@@ -2246,7 +2358,7 @@ def clear_race_timeline_table():
 
 
 def on_export_race_timeline_click():
-    """Esporta la timeline di gara in un file di testo."""
+    """Esporta la timeline di gara in un file CSV."""
     global race_timeline_last_events
 
     if not race_timeline_last_events:
@@ -2256,8 +2368,8 @@ def on_export_race_timeline_click():
         return
 
     filepath = filedialog.asksaveasfilename(
-        defaultextension=".txt",
-        filetypes=[("File di testo", "*.txt"), ("Tutti i file", "*.*")],
+        defaultextension=".csv",
+        filetypes=[("File CSV", "*.csv"), ("Tutti i file", "*.*")],
         title="Esporta Race Timeline",
     )
 
@@ -2266,8 +2378,7 @@ def on_export_race_timeline_click():
 
     try:
         with open(filepath, "w", encoding="utf-8", newline="") as f:
-            writer = csv.writer(f, delimiter="\t")
-            writer.writerow(["Race Timeline"])
+            writer = csv.writer(f)
             writer.writerow(["Timestamp", "Giro", "Tipo", "Descrizione", "Pilota/i"])
 
             for ev in race_timeline_last_events:
@@ -2286,7 +2397,7 @@ def on_export_race_timeline_click():
 
         messagebox.showinfo(
             "Export Timeline",
-            f"Timeline esportata in:\n{filepath}",
+            f"Timeline esportata in formato CSV in:\n{filepath}",
         )
     except OSError as e:
         messagebox.showerror("Export Timeline", f"Impossibile salvare il file: {e}")
@@ -6757,6 +6868,16 @@ ttk.Label(
     anchor="w",
     style="Info.TLabel",
 ).pack(fill="x", padx=4, pady=(0, 4))
+
+lift_coast_actions_frame = ttk.Frame(
+    lift_coast_tab_frame, style="Card.TFrame"
+)
+lift_coast_actions_frame.pack(fill="x", padx=5, pady=(0, 5))
+ttk.Button(
+    lift_coast_actions_frame,
+    text="Esporta Lift & Coast (CSV)",
+    command=on_export_lift_coast_click,
+).pack(side="left")
 
 lift_coast_summary_frame = ttk.LabelFrame(
     lift_coast_tab_frame,
