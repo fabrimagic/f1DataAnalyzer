@@ -15,7 +15,6 @@ from shutil import which
 
 import pandas as pd
 import numpy as np
-import fastf1
 
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -149,15 +148,6 @@ race_timeline_last_session_key = None
 car_data_cache = {}
 car_data_lap_cache = {}
 
-# FastF1 cache
-FASTF1_SESSION_CACHE = {}
-FASTF1_DRIVER_TELEMETRY_CACHE = {}
-SESSIONS_METADATA = {}
-
-FASTF1_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fastf1_cache")
-os.makedirs(FASTF1_CACHE_DIR, exist_ok=True)
-fastf1.Cache.enable_cache(FASTF1_CACHE_DIR)
-
 # Degrado gomme (Practice)
 tyre_wear_laps_tree = None
 tyre_wear_info_var = None
@@ -166,17 +156,6 @@ tyre_wear_level_label = None
 tyre_wear_canvas = None
 tyre_wear_fig = None
 tyre_wear_plot_frame = None
-
-# FastF1 Telemetria
-fastf1_summary_tree = None
-fastf1_info_var = None
-fastf1_plot_canvas = None
-fastf1_fig = None
-fastf1_speed_ax = None
-fastf1_inputs_ax = None
-fastf1_plot_frame = None
-fastf1_current_session_key = None
-fastf1_current_driver = None
 
 # Pit stop & strategia
 pit_stats_tree = None
@@ -1002,421 +981,6 @@ def get_selected_driver_info():
     return driver_number, driver_name
 
 
-# --------------------- Telemetria FastF1 --------------------- #
-
-
-def clear_fastf1_tab():
-    """Ripulisce la tab FastF1, grafici e stato corrente."""
-    global fastf1_plot_canvas, fastf1_fig, fastf1_speed_ax, fastf1_inputs_ax
-    global fastf1_current_session_key, fastf1_current_driver
-
-    if fastf1_summary_tree is not None:
-        for item in fastf1_summary_tree.get_children():
-            fastf1_summary_tree.delete(item)
-
-    if fastf1_plot_canvas is not None:
-        fastf1_plot_canvas.get_tk_widget().destroy()
-        fastf1_plot_canvas = None
-
-    fastf1_fig = None
-    fastf1_speed_ax = None
-    fastf1_inputs_ax = None
-    fastf1_current_session_key = None
-    fastf1_current_driver = None
-
-    if fastf1_info_var is not None:
-        fastf1_info_var.set(
-            "Telemetria FastF1: seleziona sessione e pilota, poi premi il pulsante dedicato per caricare i dati."
-        )
-
-
-def normalize_event_candidate(value):
-    if value is None:
-        return None
-    text = str(value).replace("_", " ").strip()
-    return " ".join(text.split()) if text else None
-
-
-def map_session_type_to_fastf1_code(session_type: str, session_name: str):
-    """Mappa session_type/session_name OpenF1 al codice atteso da FastF1."""
-    stype = (session_type or "").lower()
-    sname = (session_name or "").lower()
-    combined = f"{stype} {sname}"
-
-    if any(tok in combined for tok in ("practice 1", "fp1", "free practice 1")):
-        return "FP1"
-    if any(tok in combined for tok in ("practice 2", "fp2", "free practice 2")):
-        return "FP2"
-    if any(tok in combined for tok in ("practice 3", "fp3", "free practice 3")):
-        return "FP3"
-    if "sprint shootout" in combined or "sprint qualifying" in combined:
-        return "SQ"
-    if "sprint" in combined:
-        return "S"
-    if "qualifying" in combined or "qualifica" in combined:
-        return "Q"
-    if "race" in combined or "gara" in combined:
-        return "R"
-    return None
-
-
-def build_fastf1_event_candidates(session_info: dict):
-    candidates = []
-
-    def add_candidate(val):
-        normalized = normalize_event_candidate(val)
-        if normalized and normalized not in candidates:
-            candidates.append(normalized)
-
-    add_candidate(session_info.get("meeting_name"))
-    add_candidate(session_info.get("meeting_official_name"))
-    add_candidate(session_info.get("session_name"))
-    add_candidate(session_info.get("location"))
-    add_candidate(session_info.get("country_name"))
-    add_candidate(session_info.get("circuit_short_name"))
-
-    country = session_info.get("country_name")
-    location = session_info.get("location")
-    if country:
-        add_candidate(f"{country} Grand Prix")
-    if location:
-        add_candidate(f"{location} Grand Prix")
-
-    return candidates
-
-
-def get_fastf1_session(year: int, event_candidates, session_code: str):
-    last_error = None
-    for candidate in event_candidates:
-        try:
-            cache_key = (year, candidate, session_code)
-            if cache_key in FASTF1_SESSION_CACHE:
-                return FASTF1_SESSION_CACHE[cache_key], candidate
-
-            ff1_session = fastf1.get_session(year, candidate, session_code)
-            ff1_session.load()
-            FASTF1_SESSION_CACHE[cache_key] = ff1_session
-            return ff1_session, candidate
-        except Exception as exc:
-            last_error = exc
-            continue
-
-    error_suffix = f" Ultimo errore FastF1: {last_error}" if last_error else ""
-    raise RuntimeError(
-        "Impossibile trovare una sessione FastF1 corrispondente usando i dati disponibili." + error_suffix
-    )
-
-
-def resolve_fastf1_driver_code(ff1_session, driver_number, driver_name):
-    code = None
-    num_int = None
-    try:
-        num_int = int(driver_number)
-    except (TypeError, ValueError):
-        num_int = None
-
-    if num_int is not None:
-        try:
-            drv = ff1_session.get_driver(num_int)
-            code = getattr(drv, "abbreviation", None) or getattr(drv, "Abbreviation", None)
-            if code is None and isinstance(drv, dict):
-                code = drv.get("Abbreviation") or drv.get("DriverId")
-        except Exception:
-            code = None
-
-    if not code and driver_name:
-        try:
-            results_df = ff1_session.results
-            if results_df is not None and not results_df.empty:
-                match = results_df[results_df["FullName"] == driver_name]
-                if not match.empty:
-                    code = match.iloc[0].get("Abbreviation") or match.iloc[0].get("DriverId")
-        except Exception:
-            pass
-
-    return code
-
-
-def compute_fastf1_telemetry_for_driver(ff1_session, driver_code: str):
-    if not driver_code:
-        raise RuntimeError("Codice pilota FastF1 non valido.")
-
-    driver_laps = ff1_session.laps.pick_driver(driver_code)
-    if driver_laps is None or driver_laps.empty:
-        raise RuntimeError("Nessun giro trovato per questo pilota nella sessione FastF1.")
-
-    lap_summaries = []
-    telemetry_by_lap = {}
-
-    for _, lap in driver_laps.iterlaps():
-        lap_number = lap.get("LapNumber")
-        try:
-            lap_number_int = int(lap_number)
-        except (TypeError, ValueError):
-            continue
-
-        try:
-            lap_tel = lap.get_telemetry()
-        except Exception:
-            continue
-
-        if lap_tel is None or lap_tel.empty:
-            continue
-
-        telemetry_by_lap[lap_number_int] = lap_tel
-
-        max_speed = lap_tel.get("Speed").max() if "Speed" in lap_tel else None
-        avg_speed = lap_tel.get("Speed").mean() if "Speed" in lap_tel else None
-        avg_throttle = lap_tel.get("Throttle").mean() if "Throttle" in lap_tel else None
-        brake_usage = lap_tel.get("Brake").mean() if "Brake" in lap_tel else None
-
-        lap_summaries.append(
-            {
-                "lap": lap_number_int,
-                "lap_time": lap.get("LapTime"),
-                "max_speed": max_speed,
-                "avg_speed": avg_speed,
-                "avg_throttle": avg_throttle,
-                "brake_usage": brake_usage,
-            }
-        )
-
-    if not lap_summaries:
-        raise RuntimeError("Telemetria FastF1 non disponibile per i giri del pilota selezionato.")
-
-    lap_summaries.sort(key=lambda x: x.get("lap", 0))
-    return lap_summaries, telemetry_by_lap
-
-
-def update_fastf1_table(lap_summaries):
-    if fastf1_summary_tree is None:
-        return
-
-    for item in fastf1_summary_tree.get_children():
-        fastf1_summary_tree.delete(item)
-
-    for summary in lap_summaries:
-        lap = summary.get("lap")
-        lap_time = format_timedelta_value(summary.get("lap_time"))
-        max_speed = summary.get("max_speed")
-        avg_speed = summary.get("avg_speed")
-        avg_throttle = summary.get("avg_throttle")
-        brake_usage = summary.get("brake_usage")
-
-        throttle_pct = None
-        if isinstance(avg_throttle, (int, float)) and not pd.isna(avg_throttle):
-            throttle_pct = avg_throttle * 100 if avg_throttle <= 1.5 else avg_throttle
-
-        brake_pct = None
-        if isinstance(brake_usage, (int, float)) and not pd.isna(brake_usage):
-            brake_pct = brake_usage * 100 if brake_usage <= 1.5 else brake_usage
-
-        fastf1_summary_tree.insert(
-            "",
-            tk.END,
-            values=(
-                lap,
-                lap_time,
-                f"{max_speed:.1f}" if isinstance(max_speed, (int, float)) else "--",
-                f"{avg_speed:.1f}" if isinstance(avg_speed, (int, float)) and not pd.isna(avg_speed) else "--",
-                f"{throttle_pct:.1f}%" if isinstance(throttle_pct, (int, float)) else "--",
-                f"{brake_pct:.1f}%" if isinstance(brake_pct, (int, float)) else "--",
-            ),
-        )
-
-
-def plot_fastf1_lap(telemetry_df: pd.DataFrame, lap_number: int, driver_label: str):
-    global fastf1_plot_canvas, fastf1_fig, fastf1_speed_ax, fastf1_inputs_ax
-
-    if telemetry_df is None or telemetry_df.empty or fastf1_plot_frame is None:
-        return
-
-    if fastf1_fig is None or fastf1_speed_ax is None or fastf1_inputs_ax is None:
-        fastf1_fig = Figure(figsize=(8, 6), dpi=100)
-        fastf1_speed_ax = fastf1_fig.add_subplot(211)
-        fastf1_inputs_ax = fastf1_fig.add_subplot(212, sharex=fastf1_speed_ax)
-        fastf1_plot_canvas = FigureCanvasTkAgg(fastf1_fig, master=fastf1_plot_frame)
-        fastf1_plot_canvas.get_tk_widget().pack(fill="both", expand=True)
-
-    fastf1_speed_ax.clear()
-    fastf1_inputs_ax.clear()
-
-    if "Distance" in telemetry_df and "Speed" in telemetry_df:
-        fastf1_speed_ax.plot(telemetry_df["Distance"], telemetry_df["Speed"], color="#60a5fa")
-        fastf1_speed_ax.set_ylabel("Velocità (km/h)")
-        fastf1_speed_ax.grid(True)
-
-    throttle_plot = telemetry_df.get("Throttle") if "Throttle" in telemetry_df else None
-    brake_plot = telemetry_df.get("Brake") if "Brake" in telemetry_df else None
-
-    if throttle_plot is not None:
-        try:
-            if throttle_plot.max() <= 1.5:
-                throttle_plot = throttle_plot * 100
-        except Exception:
-            pass
-
-    if throttle_plot is not None and "Distance" in telemetry_df:
-        fastf1_inputs_ax.plot(telemetry_df["Distance"], throttle_plot, label="Throttle", color="#22c55e")
-
-    if brake_plot is not None:
-        try:
-            if brake_plot.max() <= 1.5:
-                brake_plot = brake_plot * 100
-        except Exception:
-            pass
-
-    if brake_plot is not None and "Distance" in telemetry_df:
-        fastf1_inputs_ax.plot(telemetry_df["Distance"], brake_plot, label="Brake (%)", color="#ef4444")
-
-    if "nGear" in telemetry_df and "Distance" in telemetry_df:
-        fastf1_inputs_ax.plot(telemetry_df["Distance"], telemetry_df["nGear"] * 10, label="Gear x10", color="#eab308")
-
-    fastf1_inputs_ax.set_xlabel("Distanza (m)")
-    fastf1_inputs_ax.set_ylabel("Input (%)")
-    fastf1_inputs_ax.grid(True)
-    fastf1_inputs_ax.legend()
-
-    fastf1_speed_ax.set_title(f"Telemetria FastF1 - Giro {lap_number} ({driver_label})")
-
-    if fastf1_plot_canvas is not None:
-        fastf1_plot_canvas.draw()
-
-
-def on_fastf1_lap_select(event=None):
-    selection = fastf1_summary_tree.selection() if fastf1_summary_tree is not None else []
-    if not selection:
-        return
-
-    item_id = selection[0]
-    values = fastf1_summary_tree.item(item_id, "values") if fastf1_summary_tree is not None else []
-    if not values:
-        return
-
-    try:
-        lap_number = int(values[0])
-    except (TypeError, ValueError):
-        return
-
-    cache_key = (fastf1_current_session_key, fastf1_current_driver)
-    driver_cache = FASTF1_DRIVER_TELEMETRY_CACHE.get(cache_key)
-    telemetry_by_lap = driver_cache.get("telemetry") if isinstance(driver_cache, dict) else None
-
-    if telemetry_by_lap is None:
-        return
-
-    telemetry_df = telemetry_by_lap.get(lap_number)
-    if telemetry_df is None:
-        return
-
-    plot_fastf1_lap(telemetry_df, lap_number, str(fastf1_current_driver))
-
-
-def on_fetch_fastf1_telemetry_click():
-    global fastf1_current_session_key, fastf1_current_driver
-
-    session_key, session_type, meeting_key = get_selected_session_info()
-    if session_key is None:
-        messagebox.showinfo("Info", "Seleziona prima una sessione nella tabella.")
-        return
-
-    driver_number, driver_name = get_selected_driver_info()
-    if driver_number is None:
-        messagebox.showinfo(
-            "Info", "Seleziona un pilota nei risultati prima di caricare la telemetria FastF1."
-        )
-        return
-
-    session_info = SESSIONS_METADATA.get(session_key, {})
-    year = session_info.get("year")
-    try:
-        year = int(year)
-    except (TypeError, ValueError):
-        year = None
-
-    if year is None:
-        messagebox.showerror(
-            "Errore", "Anno sessione non disponibile: ricarica il calendario e riprova."
-        )
-        return
-
-    session_code = map_session_type_to_fastf1_code(session_type, session_info.get("session_name", ""))
-    if session_code is None:
-        messagebox.showerror(
-            "Errore", "Tipo di sessione non riconosciuto per FastF1. Seleziona un'altra sessione."
-        )
-        return
-
-    candidates = build_fastf1_event_candidates(session_info)
-    if not candidates:
-        messagebox.showerror(
-            "Errore", "Nome evento non riconosciuto: impossibile costruire la mappatura FastF1."
-        )
-        return
-
-    status_var.set(
-        f"Carico telemetria FastF1 per {driver_name} ({driver_number}) nella sessione {session_code}..."
-    )
-    root.update_idletasks()
-
-    try:
-        ff1_session, used_event = get_fastf1_session(year, candidates, session_code)
-    except Exception as exc:
-        status_var.set("Errore durante il caricamento della sessione FastF1.")
-        messagebox.showerror("Errore FastF1", str(exc))
-        return
-
-    driver_code = resolve_fastf1_driver_code(ff1_session, driver_number, driver_name)
-    if not driver_code:
-        status_var.set("Codice pilota FastF1 non trovato.")
-        messagebox.showerror(
-            "Errore FastF1",
-            "Impossibile trovare il codice pilota FastF1 corrispondente. Prova con un'altra sessione.",
-        )
-        return
-
-    cache_key = (session_key, driver_number)
-    driver_cache = FASTF1_DRIVER_TELEMETRY_CACHE.get(cache_key)
-    if driver_cache and driver_cache.get("driver_code") == driver_code:
-        lap_summaries = driver_cache.get("summaries", [])
-        telemetry_by_lap = driver_cache.get("telemetry", {})
-    else:
-        try:
-            lap_summaries, telemetry_by_lap = compute_fastf1_telemetry_for_driver(ff1_session, driver_code)
-        except Exception as exc:
-            status_var.set("Errore durante l'estrazione della telemetria FastF1.")
-            messagebox.showerror("Telemetria FastF1", str(exc))
-            return
-
-        FASTF1_DRIVER_TELEMETRY_CACHE[cache_key] = {
-            "driver_code": driver_code,
-            "summaries": lap_summaries,
-            "telemetry": telemetry_by_lap,
-        }
-
-    fastf1_current_session_key = session_key
-    fastf1_current_driver = driver_number
-
-    update_fastf1_table(lap_summaries)
-
-    if lap_summaries:
-        first_lap = lap_summaries[0].get("lap")
-        first_tel = telemetry_by_lap.get(first_lap)
-        if first_tel is not None:
-            plot_fastf1_lap(first_tel, first_lap, driver_code)
-
-    plots_notebook.select(fastf1_tab)
-
-    if fastf1_info_var is not None:
-        fastf1_info_var.set(
-            f"Telemetria FastF1 caricata per {driver_name} ({driver_code}) - evento {used_event} {year}."
-        )
-
-    status_var.set(
-        f"Telemetria FastF1 pronta per {driver_name} ({driver_code}). Seleziona un giro nella tab dedicata per aggiornare i grafici."
-    )
-
-
 def clear_driver_plots():
     """Rimuove i grafici distacchi e stint gomme e resetta handler click."""
     global gap_plot_canvas, stints_plot_canvas
@@ -1467,7 +1031,6 @@ def clear_driver_plots():
     clear_compound_weather_outputs()
     clear_tyre_wear_view()
     clear_lift_and_coast_view()
-    clear_fastf1_tab()
 
 
 def clear_weather_plot():
@@ -5441,10 +5004,6 @@ def on_fetch_sessions_click():
     clear_race_control_table()
     clear_battle_pressure_table()
     clear_battle_pressure_table()
-    SESSIONS_METADATA.clear()
-    FASTF1_SESSION_CACHE.clear()
-    FASTF1_DRIVER_TELEMETRY_CACHE.clear()
-    clear_fastf1_tab()
 
     year_str = year_entry.get().strip()
     if not year_str.isdigit() or len(year_str) != 4:
@@ -5475,15 +5034,6 @@ def on_fetch_sessions_click():
         date_time = s.get("date_start", "")
         date_part = date_time[:10] if len(date_time) >= 10 else ""
         time_part = date_time[11:16] if len(date_time) >= 16 else ""
-
-        session_key_val = s.get("session_key", "")
-        try:
-            skey_int = int(session_key_val)
-        except (TypeError, ValueError):
-            skey_int = session_key_val
-
-        if skey_int:
-            SESSIONS_METADATA[skey_int] = s
 
         sessions_tree.insert(
             "",
@@ -5518,7 +5068,6 @@ def on_fetch_results_click(event=None):
     clear_stats_table()
     clear_pit_strategy()
     clear_race_control_table()
-    clear_fastf1_tab()
 
     current_pit_data = []
     current_results_data = []
@@ -6137,7 +5686,6 @@ actions = [
     ("Pit window & virtual position", on_compute_pit_window_click),
     ("Race Control pilota", on_fetch_race_control_click),
     ("Team radio pilota", on_fetch_team_radio_click),
-    ("Telemetria FastF1 pilota", on_fetch_fastf1_telemetry_click),
     ("Lift & Coast pilota", on_compute_lift_and_coast_click),
     ("Degrado gomme (Practice)", on_prepare_tyre_wear_click),
 ]
@@ -6425,7 +5973,6 @@ stints_tab, stints_tab_frame = create_scrollable_tab(plots_notebook, padding=6, 
 tyre_wear_tab, tyre_wear_tab_frame = create_scrollable_tab(plots_notebook, padding=6, style="Card.TFrame")
 race_control_tab, race_control_tab_frame = create_scrollable_tab(plots_notebook, padding=6, style="Card.TFrame")
 team_radio_tab, team_radio_tab_frame = create_scrollable_tab(plots_notebook, padding=6, style="Card.TFrame")
-fastf1_tab, fastf1_tab_frame = create_scrollable_tab(plots_notebook, padding=6, style="Card.TFrame")
 lift_coast_tab, lift_coast_tab_frame = create_scrollable_tab(plots_notebook, padding=6, style="Card.TFrame")
 weather_tab, weather_tab_frame = create_scrollable_tab(plots_notebook, padding=6, style="Card.TFrame")
 stats_tab, stats_tab_frame = create_scrollable_tab(plots_notebook, padding=6, style="Card.TFrame")
@@ -6438,80 +5985,11 @@ plots_notebook.add(stints_tab, text="Gomme: mappa & analisi")
 plots_notebook.add(tyre_wear_tab, text="Degrado Gomme")
 plots_notebook.add(race_control_tab, text="Race Control")
 plots_notebook.add(team_radio_tab, text="Team Radio")
-plots_notebook.add(fastf1_tab, text="FastF1 Telemetry")
 plots_notebook.add(lift_coast_tab, text="Lift & Coast")
 plots_notebook.add(weather_tab, text="Meteo sessione")
 plots_notebook.add(stats_tab, text="Statistiche piloti")
 plots_notebook.add(pit_strategy_tab, text="Pit stop & strategia")
 plots_notebook.add(race_timeline_tab, text="Race Timeline")
-
-# --- Contenuto tab FastF1 Telemetry --- #
-fastf1_info_var = tk.StringVar(
-    value=(
-        "Telemetria FastF1: seleziona sessione e pilota nei risultati, poi premi il pulsante "
-        "dedicato. Scegli un giro in tabella per aggiornare i grafici."
-    )
-)
-
-fastf1_info_label = ttk.Label(
-    fastf1_tab_frame,
-    textvariable=fastf1_info_var,
-    anchor="w",
-    wraplength=1250,
-    style="Info.TLabel",
-)
-fastf1_info_label.pack(fill="x", padx=5, pady=(5, 2))
-
-fastf1_table_frame = ttk.Frame(fastf1_tab_frame, style="Card.TFrame")
-fastf1_table_frame.pack(fill="both", expand=True, padx=5, pady=(0, 5))
-
-fastf1_columns = (
-    "lap",
-    "lap_time",
-    "max_speed",
-    "avg_speed",
-    "avg_throttle",
-    "brake_usage",
-)
-
-fastf1_summary_tree = ttk.Treeview(
-    fastf1_table_frame, columns=fastf1_columns, show="headings", height=10
-)
-fastf1_summary_tree.heading("lap", text="Giro")
-fastf1_summary_tree.heading("lap_time", text="Lap Time")
-fastf1_summary_tree.heading("max_speed", text="Velo max (km/h)")
-fastf1_summary_tree.heading("avg_speed", text="Velo media (km/h)")
-fastf1_summary_tree.heading("avg_throttle", text="Throttle medio")
-fastf1_summary_tree.heading("brake_usage", text="Freno medio")
-
-fastf1_summary_tree.column("lap", width=70, anchor="center")
-fastf1_summary_tree.column("lap_time", width=120, anchor="center")
-fastf1_summary_tree.column("max_speed", width=130, anchor="center")
-fastf1_summary_tree.column("avg_speed", width=130, anchor="center")
-fastf1_summary_tree.column("avg_throttle", width=130, anchor="center")
-fastf1_summary_tree.column("brake_usage", width=120, anchor="center")
-
-fastf1_vsb = ttk.Scrollbar(
-    fastf1_table_frame, orient="vertical", command=fastf1_summary_tree.yview
-)
-fastf1_summary_tree.configure(yscrollcommand=fastf1_vsb.set)
-
-fastf1_summary_tree.grid(row=0, column=0, sticky="nsew")
-fastf1_vsb.grid(row=0, column=1, sticky="ns")
-
-fastf1_table_frame.rowconfigure(0, weight=1)
-fastf1_table_frame.columnconfigure(0, weight=1)
-
-fastf1_summary_tree.bind("<<TreeviewSelect>>", on_fastf1_lap_select)
-
-ttk.Label(
-    fastf1_tab_frame,
-    text="Grafico telemetria per giro selezionato:",
-    font=("", 9, "bold"),
-).pack(anchor="w", padx=5, pady=(0, 2))
-
-fastf1_plot_frame = ttk.Frame(fastf1_tab_frame, style="Card.TFrame")
-fastf1_plot_frame.pack(fill="both", expand=True, padx=5, pady=(0, 5))
 
 # --- Contenuto tab Battaglie & Pressure Index --- #
 battle_pressure_info_var = tk.StringVar(
