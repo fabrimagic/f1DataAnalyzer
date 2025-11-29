@@ -2228,20 +2228,24 @@ def compute_race_timeline(
             driver_label,
         )
 
-    # Race control (SC/VSC/YELLOW/RED)
+    # Race control (inseriti sempre in timeline, ordinati per timestamp JSON)
     for msg in race_control_messages or []:
-        flag_text = str(msg.get("flag", "")).lower()
-        category_text = str(msg.get("category", "")).lower()
-        message_text = msg.get("message", "")
-        if not any(
-            term in flag_text or term in category_text
-            for term in ["sc", "safety", "vsc", "yellow", "red"]
-        ):
-            continue
         lap_num = msg.get("lap_number")
         ts = resolve_timestamp(msg.get("date"), lap_num)
-        flag_label = msg.get("flag") or msg.get("category") or "Race Control"
-        add_event(ts, lap_num, "Race Control", f"{flag_label}: {message_text}")
+        category = msg.get("category") or "Race Control"
+        flag_label = msg.get("flag") or ""
+        scope = msg.get("scope") or ""
+        message_text = msg.get("message", "")
+
+        description_parts = []
+        if flag_label:
+            description_parts.append(str(flag_label))
+        description_parts.append(message_text)
+        if scope:
+            description_parts.append(f"(scope: {scope})")
+
+        description = " ".join(part for part in description_parts if part).strip()
+        add_event(ts, lap_num, category, description)
 
     # Meteo: pioggia o variazioni track temp
     prev_rain = None
