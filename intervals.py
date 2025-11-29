@@ -762,6 +762,8 @@ def compute_lift_and_coast(lap_intervals, laps_car_data):
         lap_entry = ensure_lap_entry(lap_info)
 
         current_segment_start = None
+        prev_throttle = None
+        prev_brake = None
 
         def close_segment(end_ts):
             nonlocal current_segment_start
@@ -818,13 +820,21 @@ def compute_lift_and_coast(lap_intervals, laps_car_data):
             if brake is None:
                 brake = 0.0
 
-            in_lnc = throttle == 0 and brake == 0
+            prev_accel = (
+                prev_throttle is not None
+                and prev_throttle > 0
+                and (prev_brake is None or prev_brake == 0)
+            )
+            curr_coast = throttle == 0 and brake == 0
+            pedals_pressed = throttle > 0 or brake > 0
 
-            if in_lnc:
-                if current_segment_start is None:
-                    current_segment_start = sample_dt
-            elif current_segment_start is not None:
+            if current_segment_start is None and curr_coast and prev_accel:
+                current_segment_start = sample_dt
+            elif current_segment_start is not None and pedals_pressed:
                 close_segment(sample_dt)
+
+            prev_throttle = throttle
+            prev_brake = brake
 
         if current_segment_start is not None:
             close_segment(lap_info.get("end") or car_samples[-1]["date"])
