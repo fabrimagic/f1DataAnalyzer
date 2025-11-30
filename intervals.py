@@ -167,6 +167,7 @@ pit_window_tree = None
 pit_window_canvas = None
 pit_window_fig = None
 pit_window_plot_frame = None
+pit_window_last_entries = []
 
 
 # --------------------- Funzioni per le API --------------------- #
@@ -2138,6 +2139,7 @@ def clear_pit_strategy():
     """Svuota tabella e grafico di 'Pit stop & strategia'."""
     global pit_stats_tree, pit_strategy_canvas, pit_strategy_fig, pit_undercut_tree
     global pit_window_tree, pit_window_canvas, pit_window_fig
+    global pit_window_last_entries
 
     if pit_stats_tree is not None:
         for item in pit_stats_tree.get_children():
@@ -2162,6 +2164,7 @@ def clear_pit_strategy():
         pit_window_canvas = None
 
     pit_window_fig = None
+    pit_window_last_entries = []
 
 
 # --------------------- Gestione click sul grafico distacchi --------------------- #
@@ -4646,10 +4649,12 @@ def compute_pit_window_analysis(session_key, results_data, pit_data):
 
 def update_pit_window_table(entries):
     """Aggiorna la tabella della pit window nella sezione strategia."""
-    global pit_window_tree
+    global pit_window_tree, pit_window_last_entries
 
     if pit_window_tree is None:
         return
+
+    pit_window_last_entries = entries or []
 
     for item in pit_window_tree.get_children():
         pit_window_tree.delete(item)
@@ -4743,6 +4748,79 @@ def update_pit_window_plot(entries, sc_vsc_laps):
     pit_window_canvas_local.draw()
 
     pit_window_canvas = pit_window_canvas_local
+
+
+def on_export_pit_window_click():
+    """Esporta la tabella pit window/posizione virtuale in CSV."""
+    global pit_window_last_entries
+
+    if not pit_window_last_entries:
+        messagebox.showinfo(
+            "Export Pit Window", "Calcola prima la pit window da esportare."
+        )
+        return
+
+    filepath = filedialog.asksaveasfilename(
+        defaultextension=".csv",
+        filetypes=[("File CSV", "*.csv"), ("Tutti i file", "*.*")],
+        title="Esporta pit window & posizione virtuale",
+    )
+
+    if not filepath:
+        return
+
+    try:
+        with open(filepath, "w", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                [
+                    "Pilota",
+                    "Giro",
+                    "Posizione virtuale",
+                    "Gap rilevante (s)",
+                    "Pit loss stimato (s)",
+                    "Commento",
+                ]
+            )
+
+            for e in pit_window_last_entries:
+                gap_val = e.get("gap_relevant")
+                if isinstance(gap_val, (int, float)):
+                    gap_str = f"{gap_val:+.3f}"
+                else:
+                    gap_str = ""
+
+                pit_loss_val = e.get("pit_loss")
+                if isinstance(pit_loss_val, (int, float)):
+                    pit_loss_str = f"{pit_loss_val:.3f}"
+                else:
+                    pit_loss_str = ""
+
+                lap_val = e.get("lap")
+                lap_str = str(lap_val) if isinstance(lap_val, int) else ""
+
+                virtual_pos = e.get("virtual_position")
+                virtual_pos_str = str(virtual_pos) if isinstance(virtual_pos, int) else ""
+
+                writer.writerow(
+                    [
+                        e.get("driver_name", ""),
+                        lap_str,
+                        virtual_pos_str,
+                        gap_str,
+                        pit_loss_str,
+                        e.get("comment", ""),
+                    ]
+                )
+
+        messagebox.showinfo(
+            "Export Pit Window",
+            f"Analisi pit window esportata in formato CSV in:\n{filepath}",
+        )
+    except OSError as e:
+        messagebox.showerror(
+            "Export Pit Window", f"Impossibile salvare il file: {e}"
+        )
 
 def on_compute_undercut_analysis_click():
     """Callback per il bottone di analisi undercut/overcut."""
@@ -7119,11 +7197,18 @@ pit_undercut_vsb.grid(row=0, column=1, sticky="ns")
 pit_undercut_frame.rowconfigure(0, weight=1)
 pit_undercut_frame.columnconfigure(0, weight=1)
 
+pit_window_header = ttk.Frame(pit_strategy_tab_frame)
+pit_window_header.pack(fill="x", padx=5, pady=(4, 0))
 ttk.Label(
-    pit_strategy_tab_frame,
+    pit_window_header,
     text="Pit window & posizione virtuale dopo pit:",
     font=("", 9, "bold"),
-).pack(anchor="w", padx=5, pady=(4, 0))
+).pack(side="left")
+ttk.Button(
+    pit_window_header,
+    text="Esporta pit window (CSV)",
+    command=on_export_pit_window_click,
+).pack(side="right")
 
 pit_window_frame = ttk.Frame(pit_strategy_tab_frame)
 pit_window_frame.pack(fill="x", expand=False, padx=5, pady=(0, 4))
