@@ -2048,6 +2048,9 @@ def on_generate_race_timeline_click():
     root.update_idletasks()
 
     driver_number, _ = get_selected_driver_info()
+    missing_calls = []
+    laps_fetch_attempted = False
+    team_radio_attempted = False
 
     results_data = current_results_data if current_results_session_key == session_key else []
     if not results_data:
@@ -2063,6 +2066,8 @@ def on_generate_race_timeline_click():
         except RuntimeError:
             messagebox.showerror("Risultati", "Impossibile recuperare i risultati della sessione.")
             results_data = []
+    if not results_data:
+        missing_calls.append("Risultati: l'API non ha restituito dati per la sessione selezionata.")
 
     pit_data = current_pit_data if current_pit_session_key == session_key else []
     if is_race_like(session_type) and not pit_data:
@@ -2073,8 +2078,12 @@ def on_generate_race_timeline_click():
         except RuntimeError:
             messagebox.showerror("Pit stop", "Impossibile recuperare i pit stop della sessione.")
             pit_data = []
+    if not pit_data:
+        missing_calls.append("Pit stop: l'API non ha restituito dati per la sessione selezionata.")
 
     laps_data = current_laps_data if current_laps_session_key == session_key else []
+    if driver_number is not None:
+        laps_fetch_attempted = True
     if driver_number is not None and (not laps_data or current_laps_driver != driver_number):
         try:
             laps_data = fetch_laps(session_key, driver_number)
@@ -2084,6 +2093,8 @@ def on_generate_race_timeline_click():
         except RuntimeError:
             messagebox.showerror("Laps", "Impossibile recuperare i giri per il pilota selezionato.")
             laps_data = []
+    if laps_fetch_attempted and not laps_data:
+        missing_calls.append("Giri: l'API non ha restituito dati per il pilota selezionato.")
 
     weather_data = weather_last_data if weather_last_session_key == session_key else []
     if not weather_data:
@@ -2094,20 +2105,39 @@ def on_generate_race_timeline_click():
         except RuntimeError:
             messagebox.showerror("Meteo", "Impossibile recuperare i dati meteo della sessione.")
             weather_data = []
+    if not weather_data:
+        missing_calls.append("Meteo: l'API non ha restituito campioni per la sessione selezionata.")
 
     try:
         race_control_messages = fetch_race_control_messages(session_key)
     except RuntimeError as e:
         race_control_messages = []
         messagebox.showerror("Race Control", str(e))
+    if not race_control_messages:
+        missing_calls.append("Race Control: l'API non ha restituito messaggi per la sessione selezionata.")
 
     team_radio_messages = []
     if driver_number is not None:
+        team_radio_attempted = True
         try:
             team_radio_messages = fetch_team_radio(session_key, driver_number)
         except RuntimeError as e:
             team_radio_messages = []
             messagebox.showerror("Team Radio", str(e))
+    if team_radio_attempted and not team_radio_messages:
+        missing_calls.append("Team Radio: l'API non ha restituito messaggi per il pilota selezionato.")
+
+    overtakes_data = []
+    try:
+        overtakes_data = fetch_overtakes(session_key)
+    except RuntimeError as e:
+        overtakes_data = []
+        messagebox.showerror("Sorpassi", str(e))
+    if not overtakes_data:
+        missing_calls.append("Sorpassi: l'endpoint non ha restituito eventi per questa sessione.")
+
+    if missing_calls:
+        messagebox.showinfo("Dati API mancanti", "\n".join(missing_calls))
 
     events = compute_race_timeline(
         session_key,
@@ -2117,6 +2147,7 @@ def on_generate_race_timeline_click():
         weather_data,
         race_control_messages,
         team_radio_messages,
+        overtakes_data,
     )
 
     update_race_timeline_table(events)
@@ -2375,6 +2406,7 @@ def compute_race_timeline(
     weather_last_data,
     race_control_messages,
     team_radio_messages,
+    overtakes_data=None,
 ):
     """Costruisce una timeline unificata degli eventi di gara."""
 
@@ -2433,11 +2465,12 @@ def compute_race_timeline(
         )
 
     # Sorpassi
-    overtakes = []
-    try:
-        overtakes = fetch_overtakes(session_key)
-    except RuntimeError:
-        overtakes = []
+    overtakes = overtakes_data if overtakes_data is not None else []
+    if overtakes_data is None:
+        try:
+            overtakes = fetch_overtakes(session_key)
+        except RuntimeError:
+            overtakes = []
 
     for ot in overtakes:
         lap_num = ot.get("lap_number")
