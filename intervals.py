@@ -168,6 +168,7 @@ pit_window_canvas = None
 pit_window_fig = None
 pit_window_plot_frame = None
 pit_window_last_entries = []
+manual_pit_loss_var = None
 
 
 # --------------------- Funzioni per le API --------------------- #
@@ -2174,7 +2175,7 @@ def clear_pit_strategy():
     """Svuota tabella e grafico di 'Pit stop & strategia'."""
     global pit_stats_tree, pit_strategy_canvas, pit_strategy_fig, pit_undercut_tree
     global pit_window_tree, pit_window_canvas, pit_window_fig
-    global pit_window_last_entries
+    global pit_window_last_entries, manual_pit_loss_var
 
     if pit_stats_tree is not None:
         for item in pit_stats_tree.get_children():
@@ -2200,6 +2201,9 @@ def clear_pit_strategy():
 
     pit_window_fig = None
     pit_window_last_entries = []
+
+    if manual_pit_loss_var is not None:
+        manual_pit_loss_var.set("")
 
 
 # --------------------- Gestione click sul grafico distacchi --------------------- #
@@ -4534,7 +4538,7 @@ def update_pit_undercut_table(events):
         )
 
 
-def compute_pit_window_analysis(session_key, results_data, pit_data):
+def compute_pit_window_analysis(session_key, results_data, pit_data, manual_pit_loss=None):
     """Calcola pit window e posizione virtuale dopo un pit per ogni pilota/giro."""
 
     def build_cumulative_times(laps_list):
@@ -4578,6 +4582,9 @@ def compute_pit_window_analysis(session_key, results_data, pit_data):
         if isinstance(p.get("pit_duration"), (int, float))
     ]
     pit_loss_estimate = sum(pit_durations) / len(pit_durations) if pit_durations else 20.0
+
+    if isinstance(manual_pit_loss, (int, float)) and math.isfinite(manual_pit_loss) and manual_pit_loss > 0:
+        pit_loss_estimate = float(manual_pit_loss)
 
     # Dati per ogni pilota
     drivers = []
@@ -5057,7 +5064,7 @@ def on_compute_pit_strategy_click():
 
 def on_compute_pit_window_click():
     """Callback per calcolare pit window e posizione virtuale dopo pit."""
-    global current_pit_data, current_results_data
+    global current_pit_data, current_results_data, manual_pit_loss_var
 
     session_key, session_type, _ = get_selected_session_info()
     if session_key is None:
@@ -5077,12 +5084,26 @@ def on_compute_pit_window_click():
         )
         return
 
+    manual_pit_loss_value = None
+    manual_input_note = ""
+    if manual_pit_loss_var is not None:
+        raw_val = manual_pit_loss_var.get().strip()
+        if raw_val:
+            try:
+                parsed = float(raw_val.replace(",", "."))
+                if math.isfinite(parsed) and parsed > 0:
+                    manual_pit_loss_value = parsed
+                else:
+                    manual_input_note = " Valore manuale non valido: uso la media automatica."
+            except ValueError:
+                manual_input_note = " Valore manuale non valido: uso la media automatica."
+
     status_var.set("Calcolo pit window e posizione virtuale in corso...")
     root.update_idletasks()
 
     try:
         entries, pit_loss, sc_vsc_laps = compute_pit_window_analysis(
-            session_key, current_results_data, current_pit_data
+            session_key, current_results_data, current_pit_data, manual_pit_loss_value
         )
     except Exception as e:
         status_var.set("Errore durante il calcolo della pit window.")
@@ -5097,12 +5118,18 @@ def on_compute_pit_window_click():
     if not entries:
         status_var.set(
             "Nessuna stima disponibile: dati giri o pit insufficienti per calcolare la pit window."
+            + manual_input_note
         )
     else:
         pit_loss_str = f"{pit_loss:.2f}s" if pit_loss is not None else "--"
-        status_var.set(
-            f"Pit window calcolata (pit loss stimato {pit_loss_str}). Controlla tabella e grafico nella tab 'Pit stop & strategia'."
+        source_label = "manuale" if manual_pit_loss_value is not None else "stimato"
+        status_msg = (
+            f"Pit window calcolata (pit loss {source_label} {pit_loss_str}). "
+            "Controlla tabella e grafico nella tab 'Pit stop & strategia'."
         )
+        if manual_input_note and manual_pit_loss_value is None:
+            status_msg += manual_input_note
+        status_var.set(status_msg)
 
 
 # --------------------- Callback GUI principali --------------------- #
@@ -7246,6 +7273,26 @@ ttk.Button(
     text="Esporta pit window (CSV)",
     command=on_export_pit_window_click,
 ).pack(side="right")
+
+manual_pit_loss_var = tk.StringVar(value="")
+pit_loss_choice_frame = ttk.Frame(pit_strategy_tab_frame)
+pit_loss_choice_frame.pack(fill="x", padx=5, pady=(2, 4))
+ttk.Label(
+    pit_loss_choice_frame,
+    text=(
+        "Pit loss automatico dalla media dei pit oppure inserisci un valore manuale (s):"
+    ),
+).pack(side="left")
+ttk.Entry(
+    pit_loss_choice_frame,
+    width=10,
+    textvariable=manual_pit_loss_var,
+).pack(side="left", padx=(6, 4))
+ttk.Label(
+    pit_loss_choice_frame,
+    text="Lascia vuoto o inserisci un valore non valido per usare la media automatica.",
+    foreground=MUTED_TEXT,
+).pack(side="left")
 
 pit_window_frame = ttk.Frame(pit_strategy_tab_frame)
 pit_window_frame.pack(fill="x", expand=False, padx=5, pady=(0, 4))
