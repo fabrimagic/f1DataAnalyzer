@@ -1992,9 +1992,13 @@ def update_race_timeline_table(events):
         )
 
     if race_timeline_detail_var is not None:
-        race_timeline_detail_var.set(
-            f"Timeline generata con {len(events)} eventi." if events else "Nessun evento disponibile per la timeline."
-        )
+        if events:
+            overtakes_in_timeline = sum(1 for ev in events if ev.get("type") == "Sorpasso")
+            race_timeline_detail_var.set(
+                f"Timeline generata con {len(events)} eventi (sorpassi: {overtakes_in_timeline})."
+            )
+        else:
+            race_timeline_detail_var.set("Nessun evento disponibile per la timeline.")
 
 
 def on_race_timeline_select(event=None):
