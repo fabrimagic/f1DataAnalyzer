@@ -27,7 +27,8 @@ f1DataAnalyzer è un'applicazione desktop basata su Tkinter che consente di espl
   - [10. Team Radio](#10-team-radio)
   - [11. Race Timeline](#11-race-timeline)
   - [12. Altre funzionalità utili](#12-altre-funzionalità-utili)
-  - [13. Analisi degrado gomme](#13-analisi-degrado-gomme)
+  - [13. Analisi degrado gomme (Practice)](#13-analisi-degrado-gomme-practice)
+  - [14. Lift & Coast (telemetria car data)](#14-lift--coast-telemetria-car-data)
 - [Metodi di calcolo e logiche di analisi](#metodi-di-calcolo-e-logiche-di-analisi)
 - [Come interpretare i risultati](#come-interpretare-i-risultati)
 - [Limitazioni e note](#limitazioni-e-note)
@@ -112,6 +113,8 @@ L'applicazione presenta una finestra principale suddivisa in pannelli e tab:
 - **Distribuzione pit per giro**: grafico che mostra quanti pit sono avvenuti su ogni giro.
 - **Undercut/Overcut**: analisi automatica di coppie di piloti vicini in classifica. Confronta giri attorno ai pit per stimare il delta guadagnato/perduto.
 - **Pit window & posizione virtuale**: stima della posizione virtuale dopo il pit usando gap/interval dei giri circostanti e una pit loss di riferimento (15s). Evidenzia giri sotto SC/VSC e segnala finestre “safe” o rischiose.
+- **Pit loss manuale**: campo opzionale per impostare una perdita pit personalizzata (in secondi) al posto della stima automatica.
+- **Export pit window**: esportazione in CSV della tabella di pit window/posizione virtuale per analisi esterne.
 
 ### 7. Statistiche lap time
 - **Dati**: endpoint `laps` per tutti i piloti della sessione.
@@ -148,13 +151,19 @@ L'applicazione presenta una finestra principale suddivisa in pannelli e tab:
 - **Reset automatici**: cambiando pilota o sessione vengono ripuliti grafici e tabelle pertinenti (distacchi, stint, meteo, Race Control, Team Radio, timeline) per evitare dati incoerenti.
 - **Messaggi guida**: ogni sezione ha label descrittivi che indicano cosa fare (es. caricare meteo, selezionare pilota, ecc.).
 
-### 13. Analisi degrado gomme
-- **Obiettivo**: misurare in modo rapido l'aumento dei tempi giro all'interno di uno stint e confrontare il degrado tra compound e piloti.
-- **Dati**: endpoint `laps` e `stints` per il pilota selezionato; usa solo giri validi (`lap_duration` numerico, out-lap esclusi).
-- **Grafico degrado**: scatter plot e linea di regressione per tempo sul giro vs numero di giro dello stint; il coefficiente della retta indica la pendenza di degrado (slope in s/giro) e viene mostrato anche come valore sintetico.
-- **Tabella degrado stint**: elenca per ogni stint la pendenza stimata, il tempo medio e il delta tra inizio e fine stint; evidenzia i compound più sensibili al degrado.
-- **Confronto cross-driver**: selezionando più piloti nella tabella risultati è possibile sovrapporre le curve di degrado dei rispettivi stint equivalenti (stesso compound) per valutare chi gestisce meglio le gomme.
-- **Filtri e smoothing**: pulsanti dedicati per nascondere i giri anomali (es. giro lento per traffico) e per applicare un rolling mean configurabile; utile per leggere il trend reale senza rumore.
+### 13. Analisi degrado gomme (Practice)
+- **Obiettivo**: misurare l'aumento dei tempi giro in sessioni Practice, filtrando manualmente i giri utili.
+- **Dati**: endpoint `laps` per il pilota selezionato; la lista giri evidenzia out-lap, in-lap e pit stop.
+- **Selezione guidata**: l'utente sceglie manualmente i giri da analizzare (almeno 3); il sistema esclude out-lap/in-lap/pit e rimuove outlier basati sulla deviazione standard.
+- **Regressione + smoothing**: calcola una regressione lineare sui tempi smussati e mostra slope (s/giro), intercetta, R² e diagnosi sintetica del degrado.
+- **Output**: grafico con dati reali, curva smussata e retta di regressione; indicatori testuali con livello degrado (basso/medio/alto/critico).
+
+### 14. Lift & Coast (telemetria car data)
+- **Obiettivo**: quantificare la guida in lift & coast per il pilota selezionato usando la telemetria `car_data` (throttle/brake).
+- **Selezione giri**: analisi su massimo 5 giri scelti manualmente dalla lista; è disponibile un refresh rapido dei giri.
+- **Segmenti L&C**: per ciascun giro vengono individuati segmenti con acceleratore e freno a zero dopo una fase di accelerazione; si calcola durata totale e percentuale sul tempo giro.
+- **Riepilogo e dettagli**: tabella per giro con totale L&C e % sul giro, più dettaglio dei segmenti con timestamp/offset e durata.
+- **Export**: esportazione CSV dei risultati (riepilogo + segmenti) per ulteriori analisi.
 
 ## Metodi di calcolo e logiche di analisi
 - **Scia / aria pulita**: interval < 1.0s = scia; interval > 2.5s = aria pulita. Percentuali basate sui giri con interval numerico.
@@ -163,7 +172,7 @@ L'applicazione presenta una finestra principale suddivisa in pannelli e tab:
 - **Associazione giri–meteo**: per ogni giro valido si trova il campione meteo con timestamp più vicino; si calcola correlazione Pearson tra track temp e lap time e una retta di regressione lineare.
 - **Timeline di gara**: unione di sorpassi, pit stop, messaggi Race Control, eventi meteo (pioggia/variazioni), segmenti di pressione dai gap e team radio; ordinamento per timestamp (o giro se manca l'orario).
 - **Statistiche lap time**: per pilota si considerano solo lap_duration numerici e out-lap esclusi; calcolo di media, deviazione standard, best lap e gap dal best assoluto.
-- **Degrado gomme**: per ciascuno stint si filtra `lap_duration` valido, si applica (opzionalmente) un rolling mean sui tempi e si calcola una regressione lineare tempo vs giro; la pendenza (s/giro) e il delta tra primo/ultimo giro misurano il degrado.
+- **Degrado gomme (Practice)**: selezione manuale dei giri validi, rimozione outlier e regressione lineare sui tempi smussati per stimare pendenza (s/giro), R² e livello degrado.
 
 ## Come interpretare i risultati
 - **Costanza e ritmo**: media e deviazione standard dei lap time indicano regolarità; best lap e gap dal best di sessione mostrano il potenziale sul giro singolo.
@@ -182,4 +191,3 @@ L'applicazione presenta una finestra principale suddivisa in pannelli e tab:
 ## Licenza e crediti
 - Licenza: da definire dal mantenitore del repository.
 - Dati forniti da [openf1.org](https://openf1.org); verificare termini e condizioni del servizio.
-
