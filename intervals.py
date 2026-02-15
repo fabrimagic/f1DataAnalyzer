@@ -6475,6 +6475,16 @@ ttk.Label(
     style="Info.TLabel",
 ).pack(fill="x", padx=4, pady=(0, 4))
 
+lift_coast_selection_actions = ttk.Frame(
+    lift_coast_selection_frame, style="Card.TFrame"
+)
+lift_coast_selection_actions.pack(fill="x", padx=4, pady=(0, 6))
+ttk.Button(
+    lift_coast_selection_actions,
+    text="Lift & Coast pilota",
+    command=on_compute_lift_and_coast_click,
+).pack(side="left")
+
 lift_coast_actions_frame = ttk.Frame(
     lift_coast_tab_frame, style="Card.TFrame"
 )
