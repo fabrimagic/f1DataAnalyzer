@@ -1556,7 +1556,7 @@ def clear_lift_and_coast_view():
 
     if lift_coast_info_var is not None:
         lift_coast_info_var.set(
-            "Calcola il Lift & Coast per il pilota selezionato in una sessione di gara."
+            "Calcola il Lift & Coast per il pilota selezionato nella sessione caricata."
         )
 
     if lift_coast_selected_laps_var is not None:
@@ -1749,16 +1749,9 @@ def on_export_lift_coast_click():
 def on_refresh_lift_coast_laps_click():
     global current_laps_data, current_laps_driver, current_laps_session_key
 
-    session_key, session_type, _ = get_selected_session_info()
+    session_key, _, _ = get_selected_session_info()
     if session_key is None:
         messagebox.showinfo("Info", "Seleziona prima una sessione.")
-        return
-
-    if not is_race_like(session_type):
-        messagebox.showinfo(
-            "Info",
-            "Il Lift & Coast è disponibile solo per sessioni Race o Sprint.",
-        )
         return
 
     driver_number, driver_name = get_selected_driver_info()
@@ -1793,16 +1786,9 @@ def on_refresh_lift_coast_laps_click():
 def on_compute_lift_and_coast_click():
     global current_laps_data, current_laps_driver, current_laps_session_key
 
-    session_key, session_type, _ = get_selected_session_info()
+    session_key, _, _ = get_selected_session_info()
     if session_key is None:
         messagebox.showinfo("Info", "Seleziona prima una sessione.")
-        return
-
-    if not is_race_like(session_type):
-        messagebox.showinfo(
-            "Info",
-            "Il Lift & Coast è disponibile solo per sessioni Race o Sprint.",
-        )
         return
 
     driver_number, driver_name = get_selected_driver_info()
@@ -6426,7 +6412,7 @@ ttk.Button(
 # --- Contenuto tab Lift & Coast --- #
 lift_coast_info_var = tk.StringVar(
     value=(
-        "Lift & Coast: seleziona sessione Race/Sprint e pilota, carica i giri, scegli manualmente fino a 5 giri "
+        "Lift & Coast: seleziona una sessione e un pilota, carica i giri, scegli manualmente fino a 5 giri "
         "(multi-selezione) e premi 'Lift & Coast pilota' per calcolare i segmenti di rilascio e veleggio."
     )
 )
